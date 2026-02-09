@@ -1,0 +1,7 @@
+.idea/
+get-pip.py
+__pycache__/
+*.pyc
+*.pyo
+env/
+venv/
