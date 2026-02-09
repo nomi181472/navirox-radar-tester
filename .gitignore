@@ -3,6 +3,7 @@ get-pip.py
 __pycache__/
 *.pyc
 *.pyo
+*.pt
 env/
 venv/
 services/inferenced_weights/
