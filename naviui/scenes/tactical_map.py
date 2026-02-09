@@ -165,15 +165,19 @@ class TacticalMapScene(QGraphicsScene):
         obstacle_id = self.obstacle_id_counter
         self.obstacle_id_counter += 1
         
-        # Determine sector based on angle
-        # Sector 1: 0-90°, Sector 2: 90-180°, Sector 3: 180-270°, Sector 4: 270-360°
-        if 0 <= angle < 90:
+        # Determine camera sector based on angle
+        # Camera 1: 45° to 135°
+        # Camera 2: 135° to 225°
+        # Camera 3: 225° to 315°
+        # Camera 4: 315° to 360° AND 0° to 45° (wrapping around through North)
+        if 45 <= angle < 135:
             sector = 1
-        elif 90 <= angle < 180:
+        elif 135 <= angle < 225:
             sector = 2
-        elif 180 <= angle < 270:
+        elif 225 <= angle < 315:
             sector = 3
         else:
+            # 315° to 360° OR 0° to 45°
             sector = 4
         
         # Find obstacle properties
@@ -292,6 +296,55 @@ class TacticalMapScene(QGraphicsScene):
                                  QPen(QColor("#29B6F6"), 2),
                                  QBrush(QColor("#29B6F6").darker(200)))
         vessel.setZValue(10)
+        
+        # ===== CAMERA SECTOR BOUNDARY LINES =====
+        # Draw dotted lines from center to edge for each camera boundary
+        # Camera boundaries: 45°, 135°, 225°, 315°
+        sector_pen = QPen(QColor("#FFFFFF"), 1, Qt.PenStyle.DotLine)
+        sector_pen.setDashPattern([4, 4])  # Dotted pattern
+        
+        # Calculate line length (extend to edge of visible radar area)
+        line_length = min(self.scene_width, self.scene_height) / 2 - 20
+        
+        # Camera sector boundary angles
+        # CAM1: 45-135°, CAM2: 135-225°, CAM3: 225-315°, CAM4: 315-360° + 0-45°
+        sector_angles = [45, 135, 225, 315]
+        
+        for angle in sector_angles:
+            # Convert angle to radians (0° = North, clockwise)
+            angle_rad = math.radians(90 - angle)
+            
+            # Calculate end point
+            end_x = self.center_x + line_length * math.cos(angle_rad)
+            end_y = self.center_y - line_length * math.sin(angle_rad)
+            
+            # Draw the sector boundary line
+            line = self.addLine(self.center_x, self.center_y, end_x, end_y, sector_pen)
+            line.setZValue(3)
+        
+        # ===== CAMERA LABELS AT SECTOR CENTERS =====
+        # Place camera labels at the center angle of each sector
+        # CAM1 center: 90°, CAM2 center: 180°, CAM3 center: 270°, CAM4 center: 0° (360°)
+        camera_label_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        label_distance = line_length * 0.75  # Place label 75% out from center
+        
+        camera_labels = [
+            ("CAM 1", 90),    # Center of 45-135°
+            ("CAM 2", 180),   # Center of 135-225°
+            ("CAM 3", 270),   # Center of 225-315°
+            ("CAM 4", 0),     # Center of 315-45° (through 0°)
+        ]
+        
+        for cam_text, center_angle in camera_labels:
+            angle_rad = math.radians(90 - center_angle)
+            label_x = self.center_x + label_distance * math.cos(angle_rad) - 25
+            label_y = self.center_y - label_distance * math.sin(angle_rad) - 8
+            
+            # Draw camera label
+            cam_label = self.addText(cam_text, camera_label_font)
+            cam_label.setDefaultTextColor(QColor("#FFEB3B"))  # Yellow for visibility
+            cam_label.setPos(label_x, label_y)
+            cam_label.setZValue(15)
         
         # Cardinal direction labels
         dir_font = QFont("Consolas", 10, QFont.Weight.Bold)
