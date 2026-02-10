@@ -4,6 +4,9 @@ Tactical Map Scene - GIS-based radar scene with polar coordinates and obstacle m
 
 import math
 import random
+from datetime import datetime, timezone
+from typing import Any, Dict, List
+
 from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPainter, QBrush, QPen, QPainterPath, QRadialGradient
 from PyQt6.QtWidgets import QGraphicsScene
@@ -14,18 +17,14 @@ from ..utils import create_topographical_map_pixmap, create_satellite_map_pixmap
 class TacticalMapScene(QGraphicsScene):
     """GIS-based radar scene with coordinate support and dynamic obstacle generation."""
     
-    # Signal emitted when an obstacle is clicked: (camera_num, obstacle_type, angle, distance)
-    obstacle_clicked = pyqtSignal(int, str, float, float)
+    # Signal emitted when an obstacle is clicked: (camera_id, angle, distance, rtrack_id)
+    obstacle_clicked = pyqtSignal(int, float, float, int)
     
-    # Obstacle types with their visual properties
-    OBSTACLE_TYPES = [
-        {"type": "BOAT", "color": "#29B6F6", "size": 16},
-        {"type": "PERSON", "color": "#FF1744", "size": 14},
-        {"type": "DEBRIS", "color": "#FF9100", "size": 12},
-        {"type": "VESSEL", "color": "#00E676", "size": 18},
-        {"type": "BUOY", "color": "#FFEB3B", "size": 10},
-        {"type": "UNKNOWN", "color": "#9E9E9E", "size": 12},
-    ]
+    # Signal emitted when detections list changes (after add/remove)
+    radar_detections_updated = pyqtSignal(list)
+    
+    # Radar cannot classify objects — all blips share a single visual style.
+    RADAR_MARKER = {"color": "#29B6F6", "size": 14}
 
     
     def __init__(self, width: int, height: int, parent=None):
@@ -58,9 +57,10 @@ class TacticalMapScene(QGraphicsScene):
         self.marker_items = []
         self.bg_item = None
         
-        # Dynamic obstacles storage: {id: {"angle", "distance", "type", "graphics_items"}}
+        # Dynamic obstacles storage: {id: {"rtrack_id", "camera_id", "angle", "distance", "timestamp", "graphics"}}
         self.obstacles = {}
         self.obstacle_id_counter = 0
+        self._rtrack_id_counter = 0
         
         # Random generator reference
         self.random = random
@@ -86,8 +86,12 @@ class TacticalMapScene(QGraphicsScene):
         """
         Convert polar coordinates (angle, distance) to screen coordinates.
         
+        Convention:
+            0° = Right (East / horizontal)
+            Measured anti-clockwise: 90° = Up (North), 180° = Left (West), 270° = Down (South)
+        
         Args:
-            angle: Azimuth angle in degrees (0° = North/Up, 90° = East/Right, clockwise)
+            angle: Azimuth angle in degrees (0° = Right, anti-clockwise)
             distance: Distance/Range in meters from center
         
         Returns:
@@ -99,11 +103,10 @@ class TacticalMapScene(QGraphicsScene):
         # Convert distance to pixels
         pixel_distance = distance * scale * 0.8
         
-        # Convert angle to radians (adjust for screen coordinates)
-        # 0° = North (up), 90° = East (right), measured clockwise
-        angle_rad = math.radians(90 - angle)  # Convert to standard math coords
+        # Standard math convention: 0° = Right, anti-clockwise
+        angle_rad = math.radians(angle)
         
-        # Calculate screen position
+        # Calculate screen position (Y inverted for screen coords)
         pixel_x = self.center_x + pixel_distance * math.cos(angle_rad)
         pixel_y = self.center_y - pixel_distance * math.sin(angle_rad)
         
@@ -114,10 +117,11 @@ class TacticalMapScene(QGraphicsScene):
         Convert screen coordinates to polar coordinates (angle, distance).
         
         Returns:
-            (angle, distance) - angle in degrees (0° = North), distance in meters
+            (angle, distance) - angle in degrees (0° = Right, anti-clockwise),
+                                distance in meters
         """
         dx = x - self.center_x
-        dy = self.center_y - y  # Invert Y
+        dy = self.center_y - y  # Invert Y for math coords
         
         # Scale factor
         scale = 1.5 * (self.radar_height / 4.5) * 0.8
@@ -126,8 +130,8 @@ class TacticalMapScene(QGraphicsScene):
         pixel_distance = math.sqrt(dx * dx + dy * dy)
         distance = pixel_distance / scale
         
-        # Calculate angle (0° = North, clockwise)
-        angle_rad = math.atan2(dx, dy)  # atan2(x, y) gives angle from North
+        # Standard math: atan2(y, x) gives angle from Right, anti-clockwise
+        angle_rad = math.atan2(dy, dx)
         angle = math.degrees(angle_rad)
         if angle < 0:
             angle += 360
@@ -148,41 +152,61 @@ class TacticalMapScene(QGraphicsScene):
         
         return (angle, distance)
     
+    @staticmethod
+    def _iso_timestamp() -> str:
+        """Return the current UTC time as an ISO-8601 string (matches inference_service format)."""
+        return datetime.now(timezone.utc).isoformat()
+    
+    def _next_rtrack_id(self) -> int:
+        """Auto-increment radar-track ID."""
+        self._rtrack_id_counter += 1
+        return self._rtrack_id_counter
+    
+    def reset_rtrack_ids(self) -> None:
+        """Reset the radar-track ID counter. Useful between test runs."""
+        self._rtrack_id_counter = 0
+    
     # ===== OBSTACLE MANAGEMENT =====
     
-    def add_obstacle_polar(self, angle: float, distance: float, obstacle_type: str) -> int:
+    def _angle_to_camera_id(self, angle: float) -> int:
+        """
+        Determine camera sector (camera_id) from azimuth angle.
+        
+        Convention: 0° = Right (East), anti-clockwise.
+        Camera 1:  45° – 135°  (top)     |  Camera 2: 135° – 225° (left)
+        Camera 3: 225° – 315°  (bottom)  |  Camera 4: 315° – 45°  (right, wraps 0°)
+        """
+        if 45 <= angle < 135:
+            return 1
+        elif 135 <= angle < 225:
+            return 2
+        elif 225 <= angle < 315:
+            return 3
+        else:
+            return 4
+    
+    def add_obstacle_polar(self, angle: float, distance: float) -> int:
         """
         Add an obstacle at given polar coordinates.
+        
+        Radar cannot classify objects — no class_name parameter.
+        Classification is done by the FusionManager after matching with CV.
         
         Args:
             angle: Azimuth angle in degrees (0° = North, clockwise)
             distance: Distance/Range in meters
-            obstacle_type: Type of obstacle (BOAT, PERSON, DEBRIS, etc.)
         
         Returns:
-            Obstacle ID
+            Obstacle ID (internal), or -1 if out of visible range.
         """
         obstacle_id = self.obstacle_id_counter
         self.obstacle_id_counter += 1
         
-        # Determine camera sector based on angle
-        # Camera 1: 45° to 135°
-        # Camera 2: 135° to 225°
-        # Camera 3: 225° to 315°
-        # Camera 4: 315° to 360° AND 0° to 45° (wrapping around through North)
-        if 45 <= angle < 135:
-            sector = 1
-        elif 135 <= angle < 225:
-            sector = 2
-        elif 225 <= angle < 315:
-            sector = 3
-        else:
-            # 315° to 360° OR 0° to 45°
-            sector = 4
-        
-        # Find obstacle properties
-        props = next((o for o in self.OBSTACLE_TYPES if o["type"] == obstacle_type), 
-                     self.OBSTACLE_TYPES[-1])  # Default to UNKNOWN
+        camera_id = self._angle_to_camera_id(angle)
+        rtrack_id = self._next_rtrack_id()
+        timestamp = self._iso_timestamp()
+        color = self.RADAR_MARKER["color"]
+        size = self.RADAR_MARKER["size"]
         
         # Convert polar to screen coordinates
         x, y = self.polar_to_screen(angle, distance)
@@ -195,51 +219,54 @@ class TacticalMapScene(QGraphicsScene):
         graphics = []
         
         # Marker dot
-        size = props["size"]
         dot = self.addEllipse(x - size/2, y - size/2, size, size,
-                              QPen(QColor(props["color"]), 2),
-                              QBrush(QColor(props["color"]).darker(150)))
+                              QPen(QColor(color), 2),
+                              QBrush(QColor(color).darker(150)))
         dot.setZValue(5)
         graphics.append(dot)
         
         # Pulsing ring
         ring = self.addEllipse(x - size, y - size, size*2, size*2,
-                               QPen(QColor(props["color"]), 1, Qt.PenStyle.DashLine))
+                               QPen(QColor(color), 1, Qt.PenStyle.DashLine))
         ring.setZValue(4)
         graphics.append(ring)
         
-        # Label background (wider to fit sector info)
-        label_width = len(obstacle_type) * 7 + 20
+        # Label background
+        label_width = 140
         label_bg = self.addRect(x + size/2 + 4, y - 10, label_width, 18,
                                 QPen(Qt.PenStyle.NoPen),
                                 QBrush(QColor(0, 0, 0, 180)))
         label_bg.setZValue(5)
         graphics.append(label_bg)
         
-        # Label text with camera number
-        label_text = f"CAM{sector} {obstacle_type}"
+        # Label text: camera + rtrack_id (no class name — radar can't classify)
+        label_text = f"CAM{camera_id} RTRK-{rtrack_id}"
         label = self.addText(label_text, QFont("Segoe UI", 8, QFont.Weight.Bold))
-        label.setDefaultTextColor(QColor(props["color"]))
+        label.setDefaultTextColor(QColor(color))
         label.setPos(x + size/2 + 6, y - 10)
         label.setZValue(6)
         graphics.append(label)
         
-        # Polar coordinate label (Sector | Angle° | Distance m)
-        coord_text = f"Camera{sector} | {angle:.1f}° | {distance:.0f}m"
+        # Polar coordinate label
+        coord_text = f"CAM{camera_id} | {angle:.1f}° | {distance:.0f}m"
         coord_label = self.addText(coord_text, QFont("Consolas", 7))
         coord_label.setDefaultTextColor(QColor(200, 200, 200, 180))
         coord_label.setPos(x + size/2 + 4, y + 6)
         coord_label.setZValue(6)
         graphics.append(coord_label)
         
-        # Store obstacle data with polar coordinates and sector
+        # Store obstacle data (no class_name — that comes from fusion)
         self.obstacles[obstacle_id] = {
-            "angle": angle,
-            "distance": distance,
-            "sector": sector,
-            "type": obstacle_type,
-            "graphics": graphics,
+            "rtrack_id":  rtrack_id,
+            "camera_id":  camera_id,
+            "angle":      angle,
+            "distance":   distance,
+            "timestamp":  timestamp,
+            "graphics":   graphics,
         }
+        
+        # Notify consumers
+        self.radar_detections_updated.emit(self.get_radar_detections_json())
         
         return obstacle_id
     
@@ -249,12 +276,40 @@ class TacticalMapScene(QGraphicsScene):
             for item in self.obstacles[obstacle_id]["graphics"]:
                 self.removeItem(item)
             del self.obstacles[obstacle_id]
+            # Notify consumers
+            self.radar_detections_updated.emit(self.get_radar_detections_json())
+    
+    def get_radar_detections_json(self) -> List[Dict[str, Any]]:
+        """
+        Return all current obstacles as a JSON-serialisable list.
+        
+        Schema (radar-only — no class_name):
+        {
+            "rtrack_id":   int,
+            "camera_id":   int,
+            "angle":       float,
+            "distance":    float,
+            "timestamp":   str,   # ISO-8601 UTC
+        }
+        
+        TODO: When real radar hardware is integrated, replace the
+              dummy obstacle generation with actual radar returns.
+        """
+        return [
+            {
+                "rtrack_id":   obs["rtrack_id"],
+                "camera_id":   obs["camera_id"],
+                "angle":       obs["angle"],
+                "distance":    obs["distance"],
+                "timestamp":   obs["timestamp"],
+            }
+            for obs in self.obstacles.values()
+        ]
     
     def _generate_random_obstacle(self):
         """Async callback: Generate a random obstacle at random polar coordinates."""
         angle, distance = self._generate_random_polar()
-        obstacle_type = self.random.choice(self.OBSTACLE_TYPES)["type"]
-        self.add_obstacle_polar(angle, distance, obstacle_type)
+        self.add_obstacle_polar(angle, distance)
     
     def _cleanup_old_obstacles(self):
         """Remove some old obstacles to prevent overcrowding."""
@@ -265,6 +320,8 @@ class TacticalMapScene(QGraphicsScene):
     
     def _redraw_obstacles(self):
         """Redraw all obstacles after zoom/scale change."""
+        color = self.RADAR_MARKER["color"]
+        size = self.RADAR_MARKER["size"]
         for obs_id, obs_data in list(self.obstacles.items()):
             # Remove old graphics
             for item in obs_data["graphics"]:
@@ -272,15 +329,12 @@ class TacticalMapScene(QGraphicsScene):
             # Re-add at new screen position
             self.obstacles[obs_id]["graphics"] = []
             angle, distance = obs_data["angle"], obs_data["distance"]
-            props = next((o for o in self.OBSTACLE_TYPES if o["type"] == obs_data["type"]), 
-                         self.OBSTACLE_TYPES[-1])
             x, y = self.polar_to_screen(angle, distance)
             
-            # Recreate graphics items (simplified)
-            size = props["size"]
+            # Recreate marker dot
             dot = self.addEllipse(x - size/2, y - size/2, size, size,
-                                  QPen(QColor(props["color"]), 2),
-                                  QBrush(QColor(props["color"]).darker(150)))
+                                  QPen(QColor(color), 2),
+                                  QBrush(QColor(color).darker(150)))
             dot.setZValue(5)
             self.obstacles[obs_id]["graphics"].append(dot)
     
@@ -298,7 +352,7 @@ class TacticalMapScene(QGraphicsScene):
         vessel.setZValue(10)
         
         # ===== CAMERA SECTOR BOUNDARY LINES =====
-        # Draw dotted lines from center to edge for each camera boundary
+        # Convention: 0° = Right (East), anti-clockwise
         # Camera boundaries: 45°, 135°, 225°, 315°
         sector_pen = QPen(QColor("#FFFFFF"), 1, Qt.PenStyle.DotLine)
         sector_pen.setDashPattern([4, 4])  # Dotted pattern
@@ -306,13 +360,13 @@ class TacticalMapScene(QGraphicsScene):
         # Calculate line length (extend to edge of visible radar area)
         line_length = min(self.scene_width, self.scene_height) / 2 - 20
         
-        # Camera sector boundary angles
-        # CAM1: 45-135°, CAM2: 135-225°, CAM3: 225-315°, CAM4: 315-360° + 0-45°
+        # Camera sector boundary angles (0° = Right, ACW)
+        # CAM1: 45-135°, CAM2: 135-225°, CAM3: 225-315°, CAM4: 315-45°
         sector_angles = [45, 135, 225, 315]
         
         for angle in sector_angles:
-            # Convert angle to radians (0° = North, clockwise)
-            angle_rad = math.radians(90 - angle)
+            # Standard math: 0° = Right, anti-clockwise
+            angle_rad = math.radians(angle)
             
             # Calculate end point
             end_x = self.center_x + line_length * math.cos(angle_rad)
@@ -323,20 +377,20 @@ class TacticalMapScene(QGraphicsScene):
             line.setZValue(3)
         
         # ===== CAMERA LABELS AT SECTOR CENTERS =====
-        # Place camera labels at the center angle of each sector
-        # CAM1 center: 90°, CAM2 center: 180°, CAM3 center: 270°, CAM4 center: 0° (360°)
+        # CAM1 center: 90° (top), CAM2 center: 180° (left),
+        # CAM3 center: 270° (bottom), CAM4 center: 0° (right)
         camera_label_font = QFont("Segoe UI", 9, QFont.Weight.Bold)
         label_distance = line_length * 0.75  # Place label 75% out from center
         
         camera_labels = [
-            ("CAM 1", 90),    # Center of 45-135°
-            ("CAM 2", 180),   # Center of 135-225°
-            ("CAM 3", 270),   # Center of 225-315°
-            ("CAM 4", 0),     # Center of 315-45° (through 0°)
+            ("CAM 1", 90),    # Center of 45-135° → top
+            ("CAM 2", 180),   # Center of 135-225° → left
+            ("CAM 3", 270),   # Center of 225-315° → bottom
+            ("CAM 4", 0),     # Center of 315-45°  → right
         ]
         
         for cam_text, center_angle in camera_labels:
-            angle_rad = math.radians(90 - center_angle)
+            angle_rad = math.radians(center_angle)
             label_x = self.center_x + label_distance * math.cos(angle_rad) - 25
             label_y = self.center_y - label_distance * math.sin(angle_rad) - 8
             
@@ -346,13 +400,13 @@ class TacticalMapScene(QGraphicsScene):
             cam_label.setPos(label_x, label_y)
             cam_label.setZValue(15)
         
-        # Cardinal direction labels
+        # Cardinal direction labels (0°=E right, 90°=N top, 180°=W left, 270°=S bottom)
         dir_font = QFont("Consolas", 10, QFont.Weight.Bold)
         directions = [
-            ("N", self.center_x - 5, 20),
-            ("S", self.center_x - 5, self.scene_height - 30),
-            ("E", self.scene_width - 25, self.center_y - 8),
-            ("W", 10, self.center_y - 8),
+            ("0°",   self.scene_width - 30, self.center_y - 8),   # 0° = Right
+            ("90°",  self.center_x - 12, 20),                     # 90° = Top
+            ("180°", 5, self.center_y - 8),                        # 180° = Left
+            ("270°", self.center_x - 12, self.scene_height - 30),  # 270° = Bottom
         ]
         for text, x, y in directions:
             label = self.addText(text, dir_font)
@@ -536,6 +590,7 @@ class TacticalMapScene(QGraphicsScene):
     def mousePressEvent(self, event):
         """Handle mouse clicks on obstacles."""
         pos = event.scenePos()
+        hit_radius = self.RADAR_MARKER["size"] * 1.5
         
         # Check if click is on any obstacle
         for obs_id, obs_data in self.obstacles.items():
@@ -547,16 +602,11 @@ class TacticalMapScene(QGraphicsScene):
             dy = pos.y() - y
             click_distance = math.sqrt(dx * dx + dy * dy)
             
-            # Find obstacle size for hit detection
-            props = next((o for o in self.OBSTACLE_TYPES if o["type"] == obs_data["type"]), 
-                         self.OBSTACLE_TYPES[-1])
-            hit_radius = props["size"] * 1.5  # Slightly larger for easier clicking
-            
             if click_distance <= hit_radius:
-                # Obstacle clicked! Emit signal with data
-                camera_num = obs_data.get("sector", 1)
-                obstacle_type = obs_data["type"]
-                self.obstacle_clicked.emit(camera_num, obstacle_type, angle, distance)
+                # Obstacle clicked! Emit signal (no class_name — radar can't classify)
+                camera_id = obs_data["camera_id"]
+                rtrack_id = obs_data["rtrack_id"]
+                self.obstacle_clicked.emit(camera_id, angle, distance, rtrack_id)
                 return
         
         # If no obstacle clicked, call default handler
