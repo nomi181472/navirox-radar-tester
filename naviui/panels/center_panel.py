@@ -55,9 +55,9 @@ class CenterPanel(QWidget):
         # ----- Fusion Manager -----
         self.fusion_manager = FusionManager()
         
-        # Feed radar detections into fusion manager whenever they change
+        # Feed radar detections into fusion manager and immediately run fusion
         self.scene.radar_detections_updated.connect(
-            self.fusion_manager.update_radar_detections
+            self._on_radar_detections_updated
         )
         
         # When an obstacle is clicked, look up fused data and show PIP
@@ -100,6 +100,22 @@ class CenterPanel(QWidget):
         layout.addWidget(container, 1)
         layout.addWidget(coord_bar)
 
+    # ----- Radar detection handler ----------------------------------------
+
+    def _on_radar_detections_updated(self, radar_detections):
+        """
+        Called whenever radar detections change. Immediately run CV inference
+        and fusion to classify new detections without delay.
+        
+        Args:
+            radar_detections: List of radar detection dictionaries
+        """
+        # Update fusion manager with radar data
+        self.fusion_manager.update_radar_detections(radar_detections)
+        
+        # Immediately run CV inference and fusion to get classifications
+        self._run_cv_inference()
+
     # ----- CV inference (dummy) ------------------------------------------
 
     def _run_cv_inference(self):
@@ -115,7 +131,45 @@ class CenterPanel(QWidget):
             all_cv_dets.extend(dets)
 
         self.fusion_manager.update_cv_detections(all_cv_dets)
-        self.fusion_manager.fuse()
+        fused_results = self.fusion_manager.fuse()
+        
+        # Update tactical map with fused detections (add class labels)
+        self._update_map_with_fused_detections(fused_results)
+
+    def _update_map_with_fused_detections(self, fused_results):
+        """
+        Update obstacle labels on the tactical map with class information
+        from fused detections.
+        
+        Args:
+            fused_results: List of fused detection dictionaries with class_name
+        """
+        for fused_det in fused_results:
+            rtrack_id = fused_det.get("rtrack_id")
+            class_name = fused_det.get("class_name", "UNKNOWN")
+            distance = fused_det.get("distance")
+            angle = fused_det.get("angle")
+            confidence = fused_det.get("confidence")
+            
+            # Skip updating if class_name is UNKNOWN
+            if class_name == "UNKNOWN":
+                continue
+            
+            # Find the obstacle with this rtrack_id in the scene
+            for obs_id, obs_data in self.scene.obstacles.items():
+                if obs_data.get("rtrack_id") == rtrack_id:
+                    # ONLY update if NOT already classified
+                    # Once classified, keep the first classification (don't change it)
+                    if "class_name" not in obs_data:
+                        # Update the obstacle label with class name
+                        self.scene.update_obstacle_label(
+                            obs_id, 
+                            class_name, 
+                            distance, 
+                            angle,
+                            confidence
+                        )
+                    break
 
     # ----- Obstacle click → PIP ------------------------------------------
 
@@ -130,19 +184,25 @@ class CenterPanel(QWidget):
         Look up the fused record for this rtrack_id and show the PIP
         window with full data (class_name from YOLO + radar coords).
         """
-        fused = self.fusion_manager.get_fused_detections()
-
-        # Find the fused record matching this rtrack_id
-        record = next(
-            (r for r in fused if r.get("rtrack_id") == rtrack_id),
-            None,
-        )
-
-        if record:
-            class_name = record.get("class_name", "UNKNOWN")
-            track_id = record.get("track_id")
+        # Find the obstacle in the scene by rtrack_id
+        obstacle_data = None
+        for obs_id, obs_data in self.scene.obstacles.items():
+            if obs_data.get("rtrack_id") == rtrack_id:
+                obstacle_data = obs_data
+                break
+        
+        # Get class name from obstacle data if available (already classified)
+        if obstacle_data and "class_name" in obstacle_data:
+            class_name = obstacle_data.get("class_name")
+            # Find track_id from fusion manager
+            fused = self.fusion_manager.get_fused_detections()
+            record = next(
+                (r for r in fused if r.get("rtrack_id") == rtrack_id and r.get("class_name") != "UNKNOWN"),
+                None,
+            )
+            track_id = record.get("track_id") if record else None
         else:
-            # Not yet fused — show as UNKNOWN
+            # Not yet classified — show as UNKNOWN
             class_name = "UNKNOWN"
             track_id = None
 

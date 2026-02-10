@@ -62,6 +62,9 @@ class TacticalMapScene(QGraphicsScene):
         self.obstacle_id_counter = 0
         self._rtrack_id_counter = 0
         
+        # Label storage for fused detections: {obstacle_id: [text_item, bg_item]}
+        self.obstacle_labels = {}
+        
         # Random generator reference
         self.random = random
         
@@ -70,15 +73,15 @@ class TacticalMapScene(QGraphicsScene):
         self._draw_radar_sweep()
         self._draw_coordinate_overlay()
         
-        # Async obstacle generation timer
+        # Async obstacle generation timer (generates radar detections)
         self.obstacle_timer = QTimer()
         self.obstacle_timer.timeout.connect(self._generate_random_obstacle)
-        self.obstacle_timer.start(3000)  # Generate new obstacle every 3 seconds
+        self.obstacle_timer.start(3000)  # Generate new radar detection every 3 seconds
         
         # Timer to remove old obstacles
         self.cleanup_timer = QTimer()
         self.cleanup_timer.timeout.connect(self._cleanup_old_obstacles)
-        self.cleanup_timer.start(8000)  # Cleanup every 8 seconds
+        self.cleanup_timer.start(5000)  # Cleanup every 5 seconds
     
     # ===== POLAR COORDINATE METHODS =====
     
@@ -270,14 +273,217 @@ class TacticalMapScene(QGraphicsScene):
         
         return obstacle_id
     
+    def add_obstacle_polar_with_label(self, angle: float, distance: float, label: str = None, 
+                                     label_color: str = None, class_name: str = None) -> int:
+        """
+        Add obstacle with optional text label and custom styling.
+        
+        Args:
+            angle: Azimuth angle in degrees (0° = Right, anti-clockwise)
+            distance: Distance/Range in meters from center
+            label: Optional text label to display (e.g., class name)
+            label_color: Optional color for the label text (hex string)
+            class_name: Optional class name for color-coding
+        
+        Returns:
+            Obstacle ID (internal), or -1 if out of visible range.
+        """
+        # First add the basic obstacle
+        obstacle_id = self.add_obstacle_polar(angle, distance)
+        
+        # If obstacle was added successfully and we have a label, add it
+        if obstacle_id >= 0 and label:
+            x, y = self.polar_to_screen(angle, distance)
+            self._add_obstacle_label(obstacle_id, x, y, label, label_color, class_name)
+        
+        return obstacle_id
+    
+    def _add_obstacle_label(self, obstacle_id: int, x: float, y: float, label_text: str,
+                          label_color: str = None, class_name: str = None):
+        """
+        Add text label with background to an obstacle.
+        
+        Args:
+            obstacle_id: ID of the obstacle
+            x, y: Screen position coordinates
+            label_text: Text to display
+            label_color: Optional hex color for text (e.g., "#FFEB3B")
+            class_name: Optional class name for color-coding
+        """
+        from PyQt6.QtWidgets import QGraphicsTextItem, QGraphicsRectItem
+        
+        # Determine label color based on class name if not provided
+        if not label_color:
+            label_color = self._get_class_color(class_name)
+        
+        # Create text item
+        text_item = QGraphicsTextItem(label_text)
+        font = QFont("Segoe UI", 9, QFont.Weight.Bold)
+        text_item.setFont(font)
+        text_item.setDefaultTextColor(QColor(label_color))
+        
+        # Calculate text dimensions
+        text_rect = text_item.boundingRect()
+        
+        # Position text above and to the right of obstacle
+        size = self.RADAR_MARKER["size"]
+        text_x = x + size/2 + 8
+        text_y = y - text_rect.height() - 5
+        
+        # Create semi-transparent background for better readability
+        padding = 4
+        bg_rect = QGraphicsRectItem(
+            text_x - padding,
+            text_y - padding,
+            text_rect.width() + padding * 2,
+            text_rect.height() + padding * 2
+        )
+        bg_rect.setBrush(QBrush(QColor(0, 0, 0, 180)))  # Semi-transparent black
+        bg_rect.setPen(QPen(QColor(label_color), 1))  # Border matching text color
+        bg_rect.setZValue(7)  # Above obstacle markers
+        
+        # Position text item
+        text_item.setPos(text_x, text_y)
+        text_item.setZValue(8)  # Above background
+        
+        # Add to scene
+        self.addItem(bg_rect)
+        self.addItem(text_item)
+        
+        # Store references for cleanup
+        self.obstacle_labels[obstacle_id] = [bg_rect, text_item]
+    
+    def _get_class_color(self, class_name: str = None) -> str:
+        """
+        Get color for class label based on object type.
+        
+        Args:
+            class_name: Name of the detected class
+        
+        Returns:
+            Hex color string
+        """
+        if not class_name:
+            return "#29B6F6"  # Default cyan
+        
+        # Color mapping for different object types
+        class_colors = {
+            "vessel-ship": "#FF5722",    # Deep orange - large vessels
+            "vessel-boat": "#FF9800",    # Orange - smaller boats
+            "boat": "#FF9800",            # Orange
+            "ship": "#FF5722",            # Deep orange
+            "vessel": "#FF9800",          # Orange
+            "person": "#FFEB3B",          # Yellow - person/swimmer
+            "swimmer": "#FFEB3B",         # Yellow
+            "vessel-jetski": "#00E676",  # Green - jetski
+            "jetski": "#00E676",          # Green
+            "debris": "#9E9E9E",          # Gray - debris/floating objects
+            "floating_object": "#9E9E9E", # Gray
+            "buoy": "#2196F3",            # Blue - buoys
+            "unknown": "#B0BEC5",         # Light gray - unknown
+        }
+        
+        # Try exact match (case-insensitive)
+        class_lower = class_name.lower()
+        if class_lower in class_colors:
+            return class_colors[class_lower]
+        
+        # Try partial match
+        for key, color in class_colors.items():
+            if key in class_lower or class_lower in key:
+                return color
+        
+        return "#29B6F6"  # Default cyan if no match
+    
     def remove_obstacle(self, obstacle_id: int):
         """Remove an obstacle by ID."""
         if obstacle_id in self.obstacles:
             for item in self.obstacles[obstacle_id]["graphics"]:
                 self.removeItem(item)
             del self.obstacles[obstacle_id]
+            
+            # Remove associated label if exists
+            if obstacle_id in self.obstacle_labels:
+                for label_item in self.obstacle_labels[obstacle_id]:
+                    self.removeItem(label_item)
+                del self.obstacle_labels[obstacle_id]
+            
             # Notify consumers
             self.radar_detections_updated.emit(self.get_radar_detections_json())
+    
+    def update_obstacle_label(self, obstacle_id: int, class_name: str, 
+                             distance: float, angle: float, confidence: float = None):
+        """
+        Update an existing obstacle's label with class information from fusion.
+        
+        Args:
+            obstacle_id: ID of the obstacle to update
+            class_name: Classification from YOLO (e.g., "vessel-ship")
+            distance: Distance in meters
+            angle: Angle in degrees
+            confidence: Optional confidence score
+        """
+        if obstacle_id not in self.obstacles:
+            return
+        
+        obs_data = self.obstacles[obstacle_id]
+        graphics = obs_data["graphics"]
+        
+        # Find the label text and background items (indices 2 and 3 in graphics list)
+        # graphics = [dot, ring, label_bg, label_text, coord_label]
+        if len(graphics) < 4:
+            return
+        
+        label_bg = graphics[2]
+        label_text_item = graphics[3]
+        
+        # Get position from the obstacle marker
+        x = label_bg.rect().x() - 10  # Offset back to marker center
+        y = label_bg.rect().y() + 10
+        
+        # Remove old label items
+        self.removeItem(label_bg)
+        self.removeItem(label_text_item)
+        
+        # Create new label combining RTRK ID with class name
+        camera_id = obs_data.get("camera_id")
+        rtrack_id = obs_data.get("rtrack_id")
+        
+        label_text = f"CAM{camera_id} RTRK-{rtrack_id} | {class_name.upper()}"
+        if confidence:
+            label_text += f" ({confidence:.0%})"
+        
+        # Color based on class
+        color_map = {
+            "vessel-ship": "#29B6F6",    # Blue
+            "vessel-boat": "#66BB6A",    # Green
+            "person": "#FFA726",         # Orange
+            "vessel-jetski": "#AB47BC",  # Purple
+        }
+        label_color = color_map.get(class_name, "#29B6F6")
+        
+        # Calculate label dimensions based on text length
+        label_width = max(len(label_text) * 7 + 10, 180)
+        
+        # Create new background
+        new_label_bg = self.addRect(x + 10, y - 10, label_width, 18,
+                                    QPen(Qt.PenStyle.NoPen),
+                                    QBrush(QColor(0, 0, 0, 180)))
+        new_label_bg.setZValue(5)
+        
+        # Create new text
+        new_label_text = self.addText(label_text, QFont("Segoe UI", 8, QFont.Weight.Bold))
+        new_label_text.setDefaultTextColor(QColor(label_color))
+        new_label_text.setPos(x + 12, y - 10)
+        new_label_text.setZValue(6)
+        
+        # Update graphics list
+        graphics[2] = new_label_bg
+        graphics[3] = new_label_text
+        
+        # Store class name in obstacle data
+        obs_data["class_name"] = class_name
+        obs_data["confidence"] = confidence
     
     def get_radar_detections_json(self) -> List[Dict[str, Any]]:
         """
@@ -312,20 +518,68 @@ class TacticalMapScene(QGraphicsScene):
         self.add_obstacle_polar(angle, distance)
     
     def _cleanup_old_obstacles(self):
-        """Remove some old obstacles to prevent overcrowding."""
-        if len(self.obstacles) > 6:
-            # Remove oldest obstacle
-            oldest_id = min(self.obstacles.keys())
-            self.remove_obstacle(oldest_id)
+        """Remove old obstacles based on timestamp to prevent overcrowding."""
+        from datetime import datetime, timezone, timedelta
+        
+        current_time = datetime.now(timezone.utc)
+        max_age_seconds = 15  # Remove obstacles older than 15 seconds
+        
+        # Find obstacles to remove (older than threshold)
+        to_remove = []
+        for obs_id, obs_data in self.obstacles.items():
+            timestamp_str = obs_data.get("timestamp")
+            if timestamp_str:
+                try:
+                    obs_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    age = (current_time - obs_time).total_seconds()
+                    if age > max_age_seconds:
+                        to_remove.append(obs_id)
+                except (ValueError, AttributeError):
+                    pass
+        
+        # Also enforce max count (keep only newest 8 obstacles)
+        if len(self.obstacles) > 8:
+            # Sort by timestamp, remove oldest
+            sorted_obs = sorted(
+                self.obstacles.items(),
+                key=lambda x: x[1].get("timestamp", ""),
+            )
+            for obs_id, _ in sorted_obs[:len(self.obstacles) - 8]:
+                to_remove.append(obs_id)
+        
+        # Remove duplicates and delete
+        for obs_id in set(to_remove):
+            self.remove_obstacle(obs_id)
     
     def _redraw_obstacles(self):
         """Redraw all obstacles after zoom/scale change."""
         color = self.RADAR_MARKER["color"]
         size = self.RADAR_MARKER["size"]
+        
+        # Store label data before removing items
+        label_data = {}
+        for obs_id in self.obstacle_labels.keys():
+            if obs_id in self.obstacles:
+                # Extract label text and color from existing label before removing
+                if self.obstacle_labels[obs_id]:
+                    text_item = self.obstacle_labels[obs_id][1] if len(self.obstacle_labels[obs_id]) > 1 else None
+                    if text_item:
+                        label_data[obs_id] = {
+                            'text': text_item.toPlainText(),
+                            'color': text_item.defaultTextColor().name()
+                        }
+        
         for obs_id, obs_data in list(self.obstacles.items()):
             # Remove old graphics
             for item in obs_data["graphics"]:
                 self.removeItem(item)
+            
+            # Remove old labels
+            if obs_id in self.obstacle_labels:
+                for label_item in self.obstacle_labels[obs_id]:
+                    self.removeItem(label_item)
+                del self.obstacle_labels[obs_id]
+            
             # Re-add at new screen position
             self.obstacles[obs_id]["graphics"] = []
             angle, distance = obs_data["angle"], obs_data["distance"]
@@ -337,6 +591,14 @@ class TacticalMapScene(QGraphicsScene):
                                   QBrush(QColor(color).darker(150)))
             dot.setZValue(5)
             self.obstacles[obs_id]["graphics"].append(dot)
+            
+            # Recreate label if it existed
+            if obs_id in label_data:
+                self._add_obstacle_label(
+                    obs_id, x, y, 
+                    label_data[obs_id]['text'],
+                    label_data[obs_id]['color']
+                )
     
     def _draw_coordinate_overlay(self):
         """Draw radar coordinate reference on the map."""
