@@ -11,6 +11,34 @@ from constants.detections_constant import BBOX, CLASS_ID, CLASS_NAME, CONFIDENCE
 from services.model.cfgs.ibase_stage import BaseStage
 from depth_anything_v2.dpt import DepthAnythingV2
 
+DEFAULT_FRAME_WIDTH = 1920
+CAMERA_FOV_DEG = 90.0
+
+
+def bbox_center_x(bbox: List[float]) -> float:
+    return (bbox[0] + bbox[2]) / 2.0
+
+
+def bbox_to_radar_angle(
+    bbox: List[float],
+    frame_width: int = DEFAULT_FRAME_WIDTH,
+) -> float:
+    """
+    Convert bbox horizontal position to radar azimuth (0–90°).
+
+    Since camera_id is removed, we assume a single 90° FOV camera.
+    Left edge = 0°
+    Right edge = 90°
+    """
+
+    cx = bbox_center_x(bbox)
+
+    norm_x = max(0.0, min(cx / frame_width, 1.0))
+    angle = norm_x * CAMERA_FOV_DEG
+
+    return round(angle, 2)
+
+
 
 class DepthEstimationStage2(BaseStage):
     """
@@ -170,18 +198,33 @@ class DepthEstimationStage2(BaseStage):
             if clipped_bbox is None:
                 continue
 
-            # Estimate depth/distance for this object
-            distance = self._estimate_depth(depth_map, clipped_bbox)
-            distance=round(distance,3)
-            # Add depth information to detection
-            detection[OTHER] = {"distance":distance}
-            detection[BBOX] = clipped_bbox  # Update with clipped bbox
-            detection[CLASS_NAME]=f"{detection[CLASS_NAME]} {str(distance)}m"
+            # Ensure depth_map has content
+            if np.max(depth_map) <= 0:
+                 # If depth map is empty or zero, distance is 0
+                 detection[OTHER] = {"distance": 0.0, "angle": 0.0}
+                 print(f"[DepthDebug] Depth map invalid! Max: {np.max(depth_map)}, Shape: {depth_map.shape}")
+                 continue
+
+            raw_dist = self._estimate_depth(depth_map, clipped_bbox)
+            distance = round(raw_dist, 3)
+            
+            # Use original bbox for angle to correspond to original frame position
+            angle = bbox_to_radar_angle(bbox, frame_width=width)
+
+            detection[OTHER] = {
+                "distance": distance,
+                "angle": angle,
+            }
+
+            detection[BBOX] = clipped_bbox
+            detection[CLASS_NAME] = f"{detection[CLASS_NAME]} {distance}m {angle}°"
+
             # Optionally add model_id
             if MODEL_ID not in detection or not detection[MODEL_ID]:
                 detection[MODEL_ID] = self.model_id
-
+            
             print("stage2 det", detection)
+
 
         return prev_results
 

@@ -134,11 +134,13 @@ class InferenceWorker(QObject):
     frame_ready = pyqtSignal(int, object)         # camera_id, np.ndarray (as object)
     finished = pyqtSignal()
 
-    def __init__(self, camera_id: int, video_path: str, model_service: IModelService):
+    def __init__(self, camera_id: int, video_path: str, model_service: IModelService, mutex: QObject = None):
         super().__init__()
         self.camera_id = camera_id
         self.video_path = video_path
         self._model_service = model_service
+        self._mutex = mutex
+        print(f"Worker {self.camera_id}: Initialized. Mutex present: {self._mutex is not None}")
         self._running = True
         self.logger = LoggerService()
 
@@ -169,17 +171,29 @@ class InferenceWorker(QObject):
                 # Emit frame for PIP
                 self.frame_ready.emit(self.camera_id, frame.copy())
 
-                # Inference (sync)
-                results = self._model_service.model(frame)
+                # Inference (sync, guarded by mutex if provided)
+                mutex = getattr(self, '_mutex', None)
+                if mutex:
+                    mutex.lock()
+                    try:
+                        results = self._model_service.model(frame)
+                    finally:
+                        mutex.unlock()
+                else:
+                    print(f"Worker {self.camera_id}: WARN - No mutex found, running unsafe!")
+                    results = self._model_service.model(frame)
                 
                 # Parse
                 data_loader = ModelStrategyFactory.get_data_loader(self._model_service.model_id)
                 raw_detections = data_loader.load(results, frame)
 
-                # Format for FusionManager
+                # Format for TacticalMap
                 now_iso = datetime.now(UTC).isoformat()
                 fusion_dets = []
                 for det in raw_detections:
+                    # Extract angle/distance from 'other' field populated by DepthEstimationStage2
+                    other_data = det.get("other", {})
+                    
                     fusion_dets.append({
                         "track_id": det.get("track_id", 0),
                         "camera_id": self.camera_id,
@@ -187,13 +201,19 @@ class InferenceWorker(QObject):
                         "class_name": det.get("class_name", "UNKNOWN"),
                         "confidence": det.get("confidence", 0.0),
                         "timestamp": now_iso,
+                        "angle": other_data.get("angle"),
+                        "distance": other_data.get("distance"),
                     })
                 
                 self.detections_ready.emit(self.camera_id, fusion_dets)
                 
                 # Debug print for verifying detection count
                 if fusion_dets:
-                    print(f"Worker {self.camera_id}: Emitted {len(fusion_dets)} detections. First: {fusion_dets[0].get('class_name')}")
+                    # Print one detection to verify data flow
+                    first = fusion_dets[0]
+                    print(f"Worker {self.camera_id}: Emitted {len(fusion_dets)} detections. "
+                          f"First: {first.get('class_name')} "
+                          f"Dist: {first.get('distance')}m Angle: {first.get('angle')}°")
                 else:
                     # Optional: print empty once every N frames to avoid spam? For now, just print sparingly or nothing.
                     pass

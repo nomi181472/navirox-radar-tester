@@ -1,10 +1,10 @@
 """
-Center Panel - Tactical map view with PIP overlay and sensor fusion.
+Center Panel - Tactical map view with PIP overlay and direct CV pipeline integration.
 
 Wires together:
-    - TacticalMapScene  (radar detections)
+    - TacticalMapScene  (visualizes radar/CV data)
     - Real YOLO inference via UltralyticsCountFrameProcessingService
-    - FusionManager     (association logic)
+    - InferenceWorker   (background thread for inference)
     - PIPWindow         (click detail overlay)
 """
 
@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, UTC
 from typing import List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer, QThread
+from PyQt6.QtCore import Qt, QTimer, QThread, QMutex
 from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QGraphicsView
@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
 from ..scenes import TacticalMapScene
 from ..widgets import PIPWindow
 
-from services.managers.fusion_manager import FusionManager
 from services.inferenced_services.inference_service import (
     UltralyticsCountFrameProcessingService,
     InferenceWorker
@@ -38,6 +37,10 @@ class CenterPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        
+        # Mutex for thread-safe inference
+        self.inference_mutex = QMutex()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
@@ -61,21 +64,13 @@ class CenterPanel(QWidget):
         self.pip = PIPWindow(self.view)
         self.pip.move(self.view.width() - 250, 10)
 
-        # ----- Fusion Manager -----
-        self.fusion_manager = FusionManager()
-
-        # Feed radar detections into fusion manager whenever they change
-        self.scene.radar_detections_updated.connect(
-            self.fusion_manager.update_radar_detections
-        )
-
-        # When an obstacle is clicked, look up fused data and show PIP
+        # When an obstacle is clicked, look up data and show PIP
         self.scene.obstacle_clicked.connect(self._on_obstacle_clicked)
 
-        # Latest frame storage per camera
+        # Latest frame storage per camera for PIP
         self._latest_frames: Dict[int, Any] = {}
         
-        # Latest detections per camera for fusion aggregation
+        # Latest detections per camera (useful for lookups if needed)
         self._camera_detections: Dict[int, List[Dict[str, Any]]] = {}
 
         # ------------------------------------------------------------------
@@ -158,7 +153,6 @@ class CenterPanel(QWidget):
             if not self._model_ready:
                 logger.warning("CenterPanel: Model not ready, queuing camera start...")
                 # In robust app, queue this. For prototype, just warn/return or init again.
-                # Assuming init finishes quickly or is already done.
             
             self._start_camera_inference(camera_id, video_path)
         else:
@@ -170,7 +164,7 @@ class CenterPanel(QWidget):
         
         # Create Thread & Worker
         thread = QThread()
-        worker = InferenceWorker(camera_id, video_path, self._model_service)
+        worker = InferenceWorker(camera_id, video_path, self._model_service, mutex=self.inference_mutex)
         worker.moveToThread(thread)
         
         # Connect signals
@@ -179,7 +173,12 @@ class CenterPanel(QWidget):
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         
+        # Connect Data Signals
+        # 1. Update local cache
         worker.detections_ready.connect(self._handle_detections)
+        # 2. Update Map directly (CV -> Map)
+        worker.detections_ready.connect(self.scene.update_detections)
+        # 3. Handle Frame
         worker.frame_ready.connect(self._handle_frame)
         
         # Store refs
@@ -198,30 +197,25 @@ class CenterPanel(QWidget):
             self.threads[camera_id].wait()
             del self.threads[camera_id]
 
-        # Clear detections for this camera
+        # Clear detections for this camera locally
         if camera_id in self._camera_detections:
             del self._camera_detections[camera_id]
-            self._update_fusion()
-    
+            # Optionally can tell scene to clear?
+            # self.scene.update_detections([]) # Wait, this expects a list.
+            # We don't have a clear mechanism yet, but items will stale out 
+            # if we pass empty list? No, map accumulates if we don't pass anything.
+            # We'll leave it for now; stale items aren't auto-removed by map efficiently across multiple cams 
+            # without complex logic.
+
     # ----- Signal Handlers -----------------------------------------------
 
     def _handle_detections(self, camera_id: int, detections: List[Dict[str, Any]]):
-        """Receive detections from worker and update global fusion state."""
+        """Receive detections from worker and update local cache."""
         self._camera_detections[camera_id] = detections
-        self._update_fusion()
 
     def _handle_frame(self, camera_id: int, frame: Any):
         """Receive frame from worker for PIP display."""
         self._latest_frames[camera_id] = frame
-
-    def _update_fusion(self):
-        """Aggregate all cameras and trigger fusion."""
-        all_dets = []
-        for det_list in self._camera_detections.values():
-            all_dets.extend(det_list)
-        
-        self.fusion_manager.update_cv_detections(all_dets)
-        self.fusion_manager.fuse()
 
 
     # ----- Obstacle click → PIP ------------------------------------------
@@ -231,34 +225,26 @@ class CenterPanel(QWidget):
         camera_id: int,
         angle: float,
         distance: float,
-        rtrack_id: int,
+        track_id: int,
     ):
         """
-        Look up the fused record for this rtrack_id and show the PIP
-        window with full data (class_name from YOLO + radar coords).
+        Show PIP window with full data.
         """
-        fused = self.fusion_manager.get_fused_detections()
-
-        # Find the fused record matching this rtrack_id
-        record = next(
-            (r for r in fused if r.get("rtrack_id") == rtrack_id),
-            None,
-        )
-
+        # Look up class name from our local cache
+        class_name = "UNKNOWN"
+        bbox = None
+        
+        det_list = self._camera_detections.get(camera_id, [])
+        record = next((d for d in det_list if d.get("track_id") == track_id), None)
+        
         if record:
             class_name = record.get("class_name", "UNKNOWN")
-            track_id = record.get("track_id")
-        else:
-            # Not yet fused — show as UNKNOWN
-            class_name = "UNKNOWN"
-            track_id = None
+            bbox = record.get("bbox")
         
         # Prepare cropped image if available
         detection_image = None
-        if record and record.get("bbox") and record.get("camera_id"):
-            cam_id = record["camera_id"]
-            bbox = record["bbox"]
-            frame = self._latest_frames.get(cam_id)
+        if bbox is not None:
+            frame = self._latest_frames.get(camera_id)
             
             if frame is not None:
                 try:
@@ -296,7 +282,7 @@ class CenterPanel(QWidget):
             obstacle_type=class_name,
             angle=angle,
             distance=distance,
-            rtrack_id=rtrack_id,
+            rtrack_id=track_id, # Reusing track_id as rtrack_id for display
             track_id=track_id,
             detection_image=detection_image
         )
