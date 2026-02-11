@@ -1,3 +1,4 @@
+import numpy as np
 """
 Left Panel - Camera grid and radar controls.
 """
@@ -6,7 +7,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QGroupBox, QLabel, QSlider, QDoubleSpinBox
+    QGroupBox, QLabel, QSlider, QDoubleSpinBox, QFrame
 )
 
 from ..widgets import ToggleSwitch, CameraCell, HeatmapRow
@@ -40,6 +41,8 @@ class LeftPanel(QWidget):
             grid.addWidget(cell, i // 2, i % 2)
         
         camera_layout.addLayout(grid)
+
+
         
         # Zoom slider with value display
         zoom_layout = QHBoxLayout()
@@ -137,3 +140,10 @@ class LeftPanel(QWidget):
         layout.addWidget(camera_group)
         layout.addWidget(radar_group)
         layout.addStretch()
+
+    def update_camera_frame(self, camera_id: int, frame: np.ndarray):
+        """Update the video feed for a specific camera cell."""
+        # camera_id is 1-based, list is 0-based
+        idx = camera_id - 1
+        if 0 <= idx < len(self.camera_cells):
+            self.camera_cells[idx].display_annotated_frame(frame)

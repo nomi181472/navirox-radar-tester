@@ -166,9 +166,6 @@ class InferenceWorker(QObject):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 
-                # Emit frame for PIP
-                self.frame_ready.emit(self.camera_id, frame.copy())
-
                 # Inference (sync)
                 results = self._model_service.model(frame)
                 
@@ -187,23 +184,49 @@ class InferenceWorker(QObject):
                         "class_name": det.get("class_name", "UNKNOWN"),
                         "confidence": det.get("confidence", 0.0),
                         "timestamp": now_iso,
+                        "other": det.get("other", {}),
                     })
                 
                 self.detections_ready.emit(self.camera_id, fusion_dets)
                 
+                # ---------------------------
+                # Annotation (for Camera Cell & PIP)
+                # ---------------------------
+                try:
+                    annotated_frame = frame.copy()
+                    renderer = ModelStrategyFactory.get_annotation_renderer(self._model_service.model_id)
+                    # We need a ColorManager instance. Create one locally or pass it in.
+                    # Creating minimal one for worker if not passed.
+                    # Assuming ColorManager is stateless or simple enough.
+                    if not hasattr(self, '_color_manager'):
+                        from services.managers.color_manager import ColorManager
+                        self._color_manager = ColorManager()
+                    
+                    for det in raw_detections:
+                        annotated_frame = renderer.render(
+                            annotated_frame,
+                            det,
+                            [], # context/trails
+                            self._color_manager
+                        )
+                    
+                    # Emit ANNOTATED frame
+                    self.frame_ready.emit(self.camera_id, annotated_frame)
+                    
+                except Exception as e:
+                    print(f"Worker {self.camera_id} annotation error: {e}")
+                    # Fallback to raw frame
+                    self.frame_ready.emit(self.camera_id, frame.copy())
+
                 # Debug print for verifying detection count
                 if fusion_dets:
                     print(f"Worker {self.camera_id}: Emitted {len(fusion_dets)} detections. First: {fusion_dets[0].get('class_name')}")
-                else:
-                    # Optional: print empty once every N frames to avoid spam? For now, just print sparingly or nothing.
-                    pass
 
                 # Sleep to limit FPS (e.g. 100ms = 10 FPS)
                 QThread.msleep(100)
 
             except Exception as e:
                 print(f"Worker {self.camera_id} error: {e}")
-                # Don't crash thread, just sleep and retry
                 QThread.msleep(1000)
 
         cap.release()

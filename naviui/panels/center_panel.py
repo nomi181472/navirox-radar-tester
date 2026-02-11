@@ -10,6 +10,7 @@ Wires together:
 
 import cv2
 import logging
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from datetime import datetime, UTC
 from typing import List, Dict, Any
 
@@ -210,9 +211,13 @@ class CenterPanel(QWidget):
         self._camera_detections[camera_id] = detections
         self._update_fusion()
 
+    # Signal to propagate annotated frames to LeftPanel/CameraCells
+    camera_frame_ready = pyqtSignal(int, object)
+
     def _handle_frame(self, camera_id: int, frame: Any):
-        """Receive frame from worker for PIP display."""
+        """Receive frame from worker for PIP display and emit for CameraCell."""
         self._latest_frames[camera_id] = frame
+        self.camera_frame_ready.emit(camera_id, frame)
 
     def _update_fusion(self):
         """Aggregate all cameras and trigger fusion."""
@@ -221,7 +226,8 @@ class CenterPanel(QWidget):
             all_dets.extend(det_list)
         
         self.fusion_manager.update_cv_detections(all_dets)
-        self.fusion_manager.fuse()
+        mapped = self.fusion_manager.fuse()
+        self.scene.update_objects(mapped)
 
 
     # ----- Obstacle click → PIP ------------------------------------------

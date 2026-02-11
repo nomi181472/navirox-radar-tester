@@ -91,3 +91,6 @@ class MainWindow(QMainWindow):
         
         # Connect Camera Controls (LeftPanel -> CenterPanel)
         lp.camera_control_signal.connect(self.center_panel.on_camera_control)
+
+        # Connect Camera Frames (CenterPanel -> LeftPanel)
+        self.center_panel.camera_frame_ready.connect(lp.update_camera_frame)
