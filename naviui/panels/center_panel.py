@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, UTC
 from typing import List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread
 from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QGraphicsView
@@ -25,6 +25,7 @@ from ..widgets import PIPWindow
 from services.managers.fusion_manager import FusionManager
 from services.inferenced_services.inference_service import (
     UltralyticsCountFrameProcessingService,
+    InferenceWorker
 )
 from services.model_service import ModelService
 from services.common.models.pipe_structure import ModelInfo
@@ -34,17 +35,6 @@ logger = logging.getLogger(__name__)
 
 class CenterPanel(QWidget):
     """Center panel with tactical map view and sensor fusion."""
-
-    # How often (ms) the CV inference runs for each camera
-    _CV_INFERENCE_INTERVAL_MS = 3000
-
-    # ------------------------------------------------------------------
-    # Per-camera video URLs  (same for now — change individually later)
-    # ------------------------------------------------------------------
-    _DEFAULT_VIDEO_URL = (
-        r"https://ai-public-videos.s3.us-east-2.amazonaws.com/"
-        r"Raw+Videos/sea_boat.mp4"
-    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,32 +72,23 @@ class CenterPanel(QWidget):
         # When an obstacle is clicked, look up fused data and show PIP
         self.scene.obstacle_clicked.connect(self._on_obstacle_clicked)
 
-        # ------------------------------------------------------------------
-        # 4 separate video URL variables (one per camera)
-        # All default to the same URL — reassign individually later.
-        # ------------------------------------------------------------------
-        self.video_url_cam1: str = self._DEFAULT_VIDEO_URL
-        self.video_url_cam2: str = self._DEFAULT_VIDEO_URL
-        self.video_url_cam3: str = self._DEFAULT_VIDEO_URL
-        self.video_url_cam4: str = self._DEFAULT_VIDEO_URL
-
-        # Latest frame storage for PIP cropping: camera_id -> np.ndarray
+        # Latest frame storage per camera
         self._latest_frames: Dict[int, Any] = {}
+        
+        # Latest detections per camera for fusion aggregation
+        self._camera_detections: Dict[int, List[Dict[str, Any]]] = {}
 
         # ------------------------------------------------------------------
-        # Inference service + model  (shared across all 4 cameras)
+        # Multi-Threaded Inference Management
         # ------------------------------------------------------------------
-        self._inference_service = UltralyticsCountFrameProcessingService()
+        self.workers: Dict[int, InferenceWorker] = {}
+        self.threads: Dict[int, QThread] = {}
+        
         self._model_service = ModelService()
         self._model_ready = False
 
         # Kick off async model init (non-blocking)
         self._init_model()
-
-        # Periodic real CV inference (runs on all 4 cameras)
-        self._cv_timer = QTimer(self)
-        self._cv_timer.timeout.connect(self._run_cv_inference)
-        self._cv_timer.start(self._CV_INFERENCE_INTERVAL_MS)
 
         # Coordinate info bar
         coord_bar = QFrame()
@@ -144,7 +125,7 @@ class CenterPanel(QWidget):
     # ----- Model initialization ------------------------------------------
 
     def _init_model(self):
-        """Initialize the YOLO model for inference (sync wrapper)."""
+        """Initialize the YOLO model once at startup."""
         import asyncio
 
         async def _do_init():
@@ -167,101 +148,81 @@ class CenterPanel(QWidget):
         except RuntimeError:
             asyncio.run(_do_init())
 
-    # ----- CV inference (real) -------------------------------------------
+    # ----- Camera Control Slot -------------------------------------------
 
-    def _run_cv_inference(self):
-        """
-        Run real YOLO inference on all 4 cameras, convert detections
-        to the format FusionManager expects, and trigger fusion.
-        """
-        if not self._model_ready:
-            logger.debug("CenterPanel: model not ready yet, skipping inference")
-            return
+    def on_camera_control(self, camera_id: int, enabled: bool, video_path: str):
+        """Start/Stop inference for a specific camera based on LeftPanel toggle."""
+        logger.info(f"CenterPanel: Camera {camera_id} {'ON' if enabled else 'OFF'} ({video_path})")
+        
+        if enabled:
+            if not self._model_ready:
+                logger.warning("CenterPanel: Model not ready, queuing camera start...")
+                # In robust app, queue this. For prototype, just warn/return or init again.
+                # Assuming init finishes quickly or is already done.
+            
+            self._start_camera_inference(camera_id, video_path)
+        else:
+            self._stop_camera_inference(camera_id)
 
-        # Map camera_id → its video URL variable
-        camera_urls = {
-            1: self.video_url_cam1,
-            2: self.video_url_cam2,
-            3: self.video_url_cam3,
-            4: self.video_url_cam4,
-        }
+    def _start_camera_inference(self, camera_id: int, video_path: str):
+        # Stop existing if any
+        self._stop_camera_inference(camera_id)
+        
+        # Create Thread & Worker
+        thread = QThread()
+        worker = InferenceWorker(camera_id, video_path, self._model_service)
+        worker.moveToThread(thread)
+        
+        # Connect signals
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        
+        worker.detections_ready.connect(self._handle_detections)
+        worker.frame_ready.connect(self._handle_frame)
+        
+        # Store refs
+        self.threads[camera_id] = thread
+        self.workers[camera_id] = worker
+        
+        thread.start()
 
-        all_cv_dets: List[Dict[str, Any]] = []
+    def _stop_camera_inference(self, camera_id: int):
+        if camera_id in self.workers:
+            self.workers[camera_id].stop()
+            del self.workers[camera_id]
+        
+        if camera_id in self.threads:
+            self.threads[camera_id].quit()
+            self.threads[camera_id].wait()
+            del self.threads[camera_id]
 
-        for cam_id, url in camera_urls.items():
-            try:
-                dets = self._infer_single_camera(cam_id, url)
-                all_cv_dets.extend(dets)
-            except Exception as e:
-                logger.error(f"Inference failed for CAM {cam_id}: {e}")
+        # Clear detections for this camera
+        if camera_id in self._camera_detections:
+            del self._camera_detections[camera_id]
+            self._update_fusion()
+    
+    # ----- Signal Handlers -----------------------------------------------
 
-        self.fusion_manager.update_cv_detections(all_cv_dets)
+    def _handle_detections(self, camera_id: int, detections: List[Dict[str, Any]]):
+        """Receive detections from worker and update global fusion state."""
+        self._camera_detections[camera_id] = detections
+        self._update_fusion()
+
+    def _handle_frame(self, camera_id: int, frame: Any):
+        """Receive frame from worker for PIP display."""
+        self._latest_frames[camera_id] = frame
+
+    def _update_fusion(self):
+        """Aggregate all cameras and trigger fusion."""
+        all_dets = []
+        for det_list in self._camera_detections.values():
+            all_dets.extend(det_list)
+        
+        self.fusion_manager.update_cv_detections(all_dets)
         self.fusion_manager.fuse()
 
-        logger.info(
-            f"CV inference complete: {len(all_cv_dets)} detections across 4 cameras"
-        )
-
-    def _infer_single_camera(
-        self, camera_id: int, url: str
-    ) -> List[Dict[str, Any]]:
-        """
-        Grab a frame from *url*, run the YOLO model, and return a list
-        of detection dicts in the format that FusionManager expects:
-
-            {
-                "track_id":   int,
-                "camera_id":  int,
-                "bbox":       [x1, y1, x2, y2],
-                "class_name": str,
-                "confidence": float,
-                "timestamp":  str  (ISO-8601 UTC),
-            }
-        """
-        cap = cv2.VideoCapture(url)
-        try:
-            ret, frame = cap.read()
-            if not ret:
-                logger.warning(f"CAM {camera_id}: could not grab frame from {url}")
-                return []
-            
-            # Persist frame for PIP cropping
-            self._latest_frames[camera_id] = frame.copy()
-
-        finally:
-            cap.release()
-
-        # Run model inference (synchronous call)
-        results = self._model_service.model(frame)
-
-        # Parse detections through the strategy data-loader
-        from services.managers.model_strategy_manager import ModelStrategyFactory
-
-        data_loader = ModelStrategyFactory.get_data_loader(
-            self._model_service.model_id
-        )
-        raw_detections = data_loader.load(results, frame)
-
-        # Convert to fusion-manager format
-        now_iso = datetime.now(UTC).isoformat()
-        fusion_dets: List[Dict[str, Any]] = []
-
-        for det in raw_detections:
-            fusion_dets.append(
-                {
-                    "track_id": det.get("track_id", 0),
-                    "camera_id": camera_id,
-                    "bbox": det.get("bbox"),
-                    "class_name": det.get("class_name", "UNKNOWN"),
-                    "confidence": det.get("confidence", 0.0),
-                    "timestamp": now_iso,
-                }
-            )
-
-        logger.debug(
-            f"CAM {camera_id}: {len(fusion_dets)} detections"
-        )
-        return fusion_dets
 
     # ----- Obstacle click → PIP ------------------------------------------
 
@@ -291,7 +252,6 @@ class CenterPanel(QWidget):
             # Not yet fused — show as UNKNOWN
             class_name = "UNKNOWN"
             track_id = None
-
         
         # Prepare cropped image if available
         detection_image = None

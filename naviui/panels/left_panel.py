@@ -2,7 +2,7 @@
 Left Panel - Camera grid and radar controls.
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
@@ -14,6 +14,8 @@ from ..widgets import ToggleSwitch, CameraCell, HeatmapRow
 
 class LeftPanel(QWidget):
     """Left control panel with camera grid and radar controls."""
+    
+    camera_control_signal = pyqtSignal(int, bool, str)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -33,6 +35,7 @@ class LeftPanel(QWidget):
         self.camera_cells = []
         for i, cam_name in enumerate(cameras):
             cell = CameraCell(cam_name, i + 1)
+            cell.camera_state_changed.connect(self.camera_control_signal.emit)
             self.camera_cells.append(cell)
             grid.addWidget(cell, i // 2, i % 2)
         

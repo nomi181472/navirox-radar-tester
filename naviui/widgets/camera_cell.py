@@ -8,9 +8,9 @@ import numpy as np
 from datetime import datetime, UTC
 from typing import Optional, List, Dict, Any
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QFont, QImage, QPixmap
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QInputDialog, QLineEdit
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
@@ -20,6 +20,9 @@ from .toggle_switch import ToggleSwitch
 class CameraCell(QFrame):
     """Individual camera view cell with video playback, toggle control,
     and per-camera inference capability."""
+    
+    # Signal: (camera_id, is_enabled, video_path)
+    camera_state_changed = pyqtSignal(int, bool, str)
 
     # Default video source — same for all 4 cameras initially.
     # Each instance gets its own copy so you can reassign per-camera later.
@@ -32,9 +35,9 @@ class CameraCell(QFrame):
         super().__init__(parent)
         self.camera_id = camera_id
         self.camera_name = camera_name
-        self.is_enabled = True
+        self.is_enabled = False  # Start OFFLINE
         self.setObjectName("cameraCell")
-        self._update_frame_style(True)
+        self._update_frame_style(False)
 
         # ------------------------------------------------------------------
         # Per-camera video URL (change independently later)
@@ -60,7 +63,8 @@ class CameraCell(QFrame):
         )
 
         self.toggle = ToggleSwitch()
-        self.toggle.setChecked(True)
+        self.toggle = ToggleSwitch()
+        self.toggle.setChecked(False)
         self.toggle.stateChanged.connect(self._on_toggle_changed)
 
         header.addWidget(self.status_dot)
@@ -113,7 +117,11 @@ class CameraCell(QFrame):
         layout.addWidget(self.offline_label, 1)
 
         # Start video playback
-        self._start_video()
+        # self._start_video()  # Don't start automatically
+        
+        # Initial UI state
+        self.video_widget.hide()
+        self.offline_label.show()
 
     # ------------------------------------------------------------------
     # Inference helpers
@@ -181,22 +189,54 @@ class CameraCell(QFrame):
         """)
 
     def _on_toggle_changed(self, state):
-        """Handle toggle state change - play/pause video."""
-        self.is_enabled = state == 2  # Qt.CheckState.Checked = 2
-        self._update_frame_style(self.is_enabled)
+        """Handle toggle state change - prompt for path and notify."""
+        is_checked = (state == 2)
 
-        if self.is_enabled:
-            # Show video, hide offline label
-            self.video_widget.show()
-            self.offline_label.hide()
-            self.annotated_label.hide()
-            self.media_player.play()
+        if is_checked:
+            # 1. Ask user for video path
+            path, ok = QInputDialog.getText(
+                self, 
+                "Video Source", 
+                f"Enter video path/URL for {self.camera_name}:",
+                QLineEdit.EchoMode.Normal,
+                self.video_url
+            )
+            
+            if ok and path:
+                # 2. User confirmed
+                self.video_url = path
+                self.is_enabled = True
+                self._update_frame_style(True)
+                
+                # Show video, hide offline
+                self.video_widget.show()
+                self.offline_label.hide()
+                self.annotated_label.hide()
+                
+                # Restart video with new path
+                self._start_video()
+                
+                # Emit signal to start inference
+                self.camera_state_changed.emit(self.camera_id, True, self.video_url)
+            else:
+                # 3. User cancelled or empty -> Revert toggle
+                self.toggle.blockSignals(True)
+                self.toggle.setChecked(False)
+                self.toggle.blockSignals(False)
+                self.is_enabled = False
         else:
-            # Pause video, show offline label
+            # Turned OFF
+            self.is_enabled = False
+            self._update_frame_style(False)
+            
+            # Pause video
             self.media_player.pause()
             self.video_widget.hide()
             self.annotated_label.hide()
             self.offline_label.show()
+            
+            # Emit signal to stop inference
+            self.camera_state_changed.emit(self.camera_id, False, "")
 
         self.status_dot.setStyleSheet(
             f"color: {'#00E676' if self.is_enabled else '#FF1744'}; font-size: 10px; background: transparent;"
