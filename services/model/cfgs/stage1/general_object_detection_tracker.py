@@ -108,7 +108,7 @@ class GeneralObjectTrackerStage1(BaseStage):
         except Exception as e:
             print(f"Tracking failed: {e}")
             detections = []
-        
+        print("stage1 det ",detections)
         return detections
 
 

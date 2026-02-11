@@ -30,6 +30,7 @@ class DepthEstimationStage2(BaseStage):
         features: int = 128,
         out_channels: Optional[List[int]] = None,
         device: Optional[str] = None,
+        tag: Optional[str] = "",
         depth_scale_factor: float = 10.0,
         exclude_classes: Optional[List[str]] = None,
     ):
@@ -179,6 +180,8 @@ class DepthEstimationStage2(BaseStage):
             # Optionally add model_id
             if MODEL_ID not in detection or not detection[MODEL_ID]:
                 detection[MODEL_ID] = self.model_id
+
+            print("stage2 det", detection)
 
         return prev_results
 

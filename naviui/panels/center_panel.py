@@ -131,7 +131,7 @@ class CenterPanel(QWidget):
         async def _do_init():
             try:
                 await self._model_service.initialize_model(
-                    models=[ModelInfo(model_id="yolo11n", order=0,lead_by="")],
+                    models=[ModelInfo(model_id="yolo11n", order=0,lead_by=""),ModelInfo(model_id="depth_anything_v2_vits", order=1,lead_by="yolo11n")],
                     tag="all",
                 )
                 self._model_ready = True

@@ -70,6 +70,8 @@ class ByteTracker(BaseTracker):
                 tag=tag
             )
 
+            print("tracker det",detections)
+
         return detections
 
 

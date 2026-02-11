@@ -34,11 +34,11 @@ class ModelRegistry:
             stage=0,
             stage_class=GeneralObjectTrackerStage1
         ),
-        # "depth_anything_v2_vits": ModelStage(
-        #     model_id="depth_anything_v2_vits",
-        #     stage=1,
-        #     stage_class=DepthEstimationStage2
-        # ),
+        "depth_anything_v2_vits": ModelStage(
+            model_id="depth_anything_v2_vits",
+            stage=1,
+            stage_class=DepthEstimationStage2
+        ),
         # "raft_small": ModelStage(
         #     model_id="raft_small",
         #     stage=2,
