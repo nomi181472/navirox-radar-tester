@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QFont, QImage, QPixmap
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QInputDialog, QLineEdit
+from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
@@ -66,9 +66,20 @@ class CameraCell(QFrame):
         self.toggle = ToggleSwitch()
         self.toggle.setChecked(False)
         self.toggle.stateChanged.connect(self._on_toggle_changed)
+        
+        # FPS display label
+        self.fps_label = QLabel("-- FPS")
+        self.fps_label.setFont(QFont("Segoe UI", 8))
+        self.fps_label.setStyleSheet("""
+            color: #29B6F6; 
+            background: transparent; 
+            font-weight: bold;
+            padding: 2px 4px;
+        """)
 
         header.addWidget(self.status_dot)
         header.addWidget(self.label)
+        header.addWidget(self.fps_label)
         header.addStretch()
         header.addWidget(self.toggle)
 
@@ -158,6 +169,10 @@ class CameraCell(QFrame):
         # Show annotated overlay, hide raw video
         self.annotated_label.show()
         self.video_widget.hide()
+    
+    def update_fps(self, fps: float) -> None:
+        """Update the FPS display label."""
+        self.fps_label.setText(f"{fps:.1f} FPS")
 
     # ------------------------------------------------------------------
     # Video playback
@@ -189,22 +204,12 @@ class CameraCell(QFrame):
         """)
 
     def _on_toggle_changed(self, state):
-        """Handle toggle state change - prompt for path and notify."""
+        """Handle toggle state change - use pre-set video URL."""
         is_checked = (state == 2)
 
         if is_checked:
-            # 1. Ask user for video path
-            path, ok = QInputDialog.getText(
-                self, 
-                "Video Source", 
-                f"Enter video path/URL for {self.camera_name}:",
-                QLineEdit.EchoMode.Normal,
-                self.video_url
-            )
-            
-            if ok and path:
-                # 2. User confirmed
-                self.video_url = path
+            # Use the video URL that's already set (from left panel input)
+            if self.video_url:
                 self.is_enabled = True
                 self._update_frame_style(True)
                 
@@ -213,13 +218,13 @@ class CameraCell(QFrame):
                 self.offline_label.hide()
                 self.annotated_label.hide()
                 
-                # Restart video with new path
+                # Restart video with current path
                 self._start_video()
                 
                 # Emit signal to start inference
                 self.camera_state_changed.emit(self.camera_id, True, self.video_url)
             else:
-                # 3. User cancelled or empty -> Revert toggle
+                # No URL set - revert toggle
                 self.toggle.blockSignals(True)
                 self.toggle.setChecked(False)
                 self.toggle.blockSignals(False)
@@ -235,6 +240,9 @@ class CameraCell(QFrame):
             self.annotated_label.hide()
             self.offline_label.show()
             
+            # Reset FPS display
+            self.fps_label.setText("-- FPS")
+            
             # Emit signal to stop inference
             self.camera_state_changed.emit(self.camera_id, False, "")
 
@@ -244,3 +252,4 @@ class CameraCell(QFrame):
         self.label.setStyleSheet(
             f"color: {'#B0BEC5' if self.is_enabled else '#666'}; background: transparent;"
         )
+

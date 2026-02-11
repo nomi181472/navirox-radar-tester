@@ -6,7 +6,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
-    QGroupBox, QLabel, QSlider, QDoubleSpinBox
+    QGroupBox, QLabel, QSlider, QDoubleSpinBox, QLineEdit
 )
 
 from ..widgets import ToggleSwitch, CameraCell, HeatmapRow
@@ -27,17 +27,61 @@ class LeftPanel(QWidget):
         camera_group = QGroupBox("Camera & Sensor Controls")
         camera_layout = QVBoxLayout(camera_group)
         
-        # 2x2 Camera Grid
+        # 2x2 Camera Grid with URL inputs
         grid = QGridLayout()
         grid.setSpacing(8)
         
         cameras = ["CAM 1 (FWD)", "CAM 2 (AFT)", "CAM 3 (PORT)", "CAM 4 (STBD)"]
         self.camera_cells = []
+        self.url_inputs = []
+        
+        # Default video URL
+        default_url = "https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/sea_boat.mp4"
+        
         for i, cam_name in enumerate(cameras):
+            # Create a container for each camera cell + URL input
+            cell_container = QWidget()
+            cell_layout = QVBoxLayout(cell_container)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(6)
+            
+            # Camera cell
             cell = CameraCell(cam_name, i + 1)
             cell.camera_state_changed.connect(self.camera_control_signal.emit)
             self.camera_cells.append(cell)
-            grid.addWidget(cell, i // 2, i % 2)
+            
+            # URL input field
+            url_input = QLineEdit()
+            url_input.setPlaceholderText("Enter video URL...")
+            url_input.setText(default_url)
+            url_input.setStyleSheet("""
+                QLineEdit {
+                    background-color: #1E2228;
+                    color: #B0BEC5;
+                    border: 1px solid #3A3F4B;
+                    border-radius: 4px;
+                    padding: 6px 8px;
+                    font-size: 9px;
+                    font-family: 'Segoe UI', sans-serif;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #29B6F6;
+                    background-color: #252A32;
+                }
+                QLineEdit:hover {
+                    border: 1px solid #4A5160;
+                }
+            """)
+            url_input.setToolTip(f"Video URL for {cam_name}")
+            self.url_inputs.append(url_input)
+            
+            # Connect URL input to camera cell
+            url_input.textChanged.connect(lambda text, idx=i: self._on_url_changed(idx, text))
+            
+            cell_layout.addWidget(cell)
+            cell_layout.addWidget(url_input)
+            
+            grid.addWidget(cell_container, i // 2, i % 2)
         
         camera_layout.addLayout(grid)
         
@@ -137,3 +181,8 @@ class LeftPanel(QWidget):
         layout.addWidget(camera_group)
         layout.addWidget(radar_group)
         layout.addStretch()
+    
+    def _on_url_changed(self, camera_index: int, url: str):
+        """Update the camera cell's video URL when the input field changes."""
+        if 0 <= camera_index < len(self.camera_cells):
+            self.camera_cells[camera_index].video_url = url

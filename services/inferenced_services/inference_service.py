@@ -132,6 +132,7 @@ class InferenceWorker(QObject):
     """
     detections_ready = pyqtSignal(int, list)      # camera_id, list of detection dicts
     frame_ready = pyqtSignal(int, object)         # camera_id, np.ndarray (as object)
+    fps_updated = pyqtSignal(int, float)          # camera_id, fps
     finished = pyqtSignal()
 
     def __init__(self, camera_id: int, video_path: str, model_service: IModelService):
@@ -141,6 +142,11 @@ class InferenceWorker(QObject):
         self._model_service = model_service
         self._running = True
         self.logger = LoggerService()
+        
+        # FPS tracking
+        self._frame_count = 0
+        self._fps_start_time = time.time()
+        self._current_fps = 0.0
 
     def run(self):
         """Main inference loop."""
@@ -190,6 +196,16 @@ class InferenceWorker(QObject):
                     })
                 
                 self.detections_ready.emit(self.camera_id, fusion_dets)
+                
+                # Calculate and emit FPS
+                self._frame_count += 1
+                if self._frame_count % 30 == 0:  # Update FPS every 30 frames
+                    current_time = time.time()
+                    elapsed = current_time - self._fps_start_time
+                    if elapsed > 0:
+                        self._current_fps = 30 / elapsed
+                        self.fps_updated.emit(self.camera_id, self._current_fps)
+                        self._fps_start_time = current_time
                 
                 # Debug print for verifying detection count
                 if fusion_dets:

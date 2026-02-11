@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, UTC
 from typing import List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer, QThread
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QGraphicsView
@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 class CenterPanel(QWidget):
     """Center panel with tactical map view and sensor fusion."""
+    
+    fps_updated = pyqtSignal(int, float)  # camera_id, fps
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -181,6 +183,7 @@ class CenterPanel(QWidget):
         
         worker.detections_ready.connect(self._handle_detections)
         worker.frame_ready.connect(self._handle_frame)
+        worker.fps_updated.connect(self._handle_fps)
         
         # Store refs
         self.threads[camera_id] = thread
@@ -213,6 +216,10 @@ class CenterPanel(QWidget):
     def _handle_frame(self, camera_id: int, frame: Any):
         """Receive frame from worker for PIP display."""
         self._latest_frames[camera_id] = frame
+    
+    def _handle_fps(self, camera_id: int, fps: float):
+        """Receive FPS from worker and forward to UI."""
+        self.fps_updated.emit(camera_id, fps)
 
     def _update_fusion(self):
         """Aggregate all cameras and trigger fusion."""

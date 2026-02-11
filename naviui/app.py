@@ -91,3 +91,12 @@ class MainWindow(QMainWindow):
         
         # Connect Camera Controls (LeftPanel -> CenterPanel)
         lp.camera_control_signal.connect(self.center_panel.on_camera_control)
+        
+        # Connect FPS updates (CenterPanel -> LeftPanel camera cells)
+        self.center_panel.fps_updated.connect(self._update_camera_fps)
+    
+    def _update_camera_fps(self, camera_id: int, fps: float):
+        """Update the FPS display for a specific camera."""
+        # camera_id is 1-indexed, but list is 0-indexed
+        if 1 <= camera_id <= len(self.left_panel.camera_cells):
+            self.left_panel.camera_cells[camera_id - 1].update_fps(fps)
