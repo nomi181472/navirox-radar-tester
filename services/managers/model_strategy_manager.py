@@ -21,4 +21,4 @@ class ModelStrategyFactory:
         if model_id == "navirox_obb.pt":
             return DirectionAnnotationRenderer()
 
-        return DetectionAnnotationRenderer()
+        return DirectionAnnotationRenderer()

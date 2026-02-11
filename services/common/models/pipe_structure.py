@@ -1,7 +1,32 @@
-from pydantic import BaseModel,model_validator
-from typing import Any,Optional
+from pydantic import BaseModel,model_validator,Field
+from typing import Any,Optional,Type
 from typing import List
 from enum import Enum
+import numpy as np
+from services.model.cfgs.ibase_stage import BaseStage
+
+class YoloCountItem(BaseModel):
+    detection: List[Any]
+    total_detections: int
+    timestamp: Optional[str]
+    processing_success: bool
+    frame_base64: Optional[str] = None
+    annotated_frame: Optional[np.ndarray] = None
+    error_message: Optional[str] = None
+
+
+class ModelStage(BaseModel):
+    model_id: str
+    stage: int
+    stage_class: Type[BaseStage] = Field(exclude=True)
+
+    def create_instance(self, model_path: str, tag: str, device: str) -> BaseStage:
+        return self.stage_class(
+            model_id=self.model_id,
+            model_path=model_path,
+            tag=tag,
+            device=device,
+        )
 
 class RegionType(str, Enum):
     POLYGON = "polygon"
