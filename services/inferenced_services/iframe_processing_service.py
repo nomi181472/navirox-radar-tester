@@ -3,7 +3,7 @@ from typing import Optional
 import numpy as np
 
 from services.interfaces.imodel_service import IModelService
-from services.common.models.yolo_models import YoloCountItem
+from services.common.models.pipe_structure import YoloCountItem
 
 
 class IFrameProcessingService(ABC):

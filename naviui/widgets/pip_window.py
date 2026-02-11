@@ -7,6 +7,7 @@ from PyQt6.QtGui import QFont, QColor, QPainter, QPixmap, QPen, QLinearGradient
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
 import urllib.request
 from io import BytesIO
+from typing import Optional
 
 
 class PIPWindow(QFrame):
@@ -113,7 +114,7 @@ class PIPWindow(QFrame):
         # Hide by default
         self.hide()
     
-    def show_obstacle(self, camera_num: int, obstacle_type: str, angle: float, distance: float, rtrack_id: int = 0, track_id: int = None):
+    def show_obstacle(self, camera_num: int, obstacle_type: str, angle: float, distance: float, rtrack_id: int = 0, track_id: int = None, detection_image: Optional[QPixmap] = None):
         """Show PIP window with specific obstacle data."""
         # Get color for this type
         color = self.COLOR_MAP.get(obstacle_type, "#9E9E9E")
@@ -137,9 +138,15 @@ class PIPWindow(QFrame):
         trk_part = f" TRK-{track_id}" if track_id is not None else ""
         self.info_label.setText(f"RTRK-{rtrack_id}{trk_part} | {angle:.1f}° | {distance:.0f}m")
         
-        # Load appropriate image
-        image_path = self.IMAGE_MAP.get(obstacle_type)
-        pixmap = self._load_image(image_path) if image_path else QPixmap()
+        # Load image (priority: dynamic crop > static map > unknown placeholder)
+        pixmap = QPixmap()
+        
+        if detection_image is not None and not detection_image.isNull():
+            pixmap = detection_image
+        else:
+            image_path = self.IMAGE_MAP.get(obstacle_type)
+            if image_path:
+                pixmap = self._load_image(image_path)
 
         if pixmap.isNull():
             # Create UNKNOWN placeholder image with bbox

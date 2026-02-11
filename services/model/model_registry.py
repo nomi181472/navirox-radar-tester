@@ -11,6 +11,10 @@ from services.common.models.pipe_structure import ModelStage
 from services.logger_service import LoggerService
 from torchvision.models.optical_flow import raft_large, raft_small, Raft_Large_Weights, Raft_Small_Weights
 
+# Import stage classes
+from services.model.cfgs.stage1.general_object_detection_tracker import GeneralObjectTrackerStage1
+from services.model.cfgs.stage2.depth_estimation_stage2 import DepthEstimationStage2
+from services.model.cfgs.stage3.raft_direction_estimation_stage3 import RAFTDirectionEstimationStage3
 class ModelRegistry:
     """
     Singleton registry for model loading and reuse.
@@ -25,10 +29,21 @@ class ModelRegistry:
     # Model → Stage mapping
     # -------------------------------------------------
     MODEL_STAGE_MAP: Dict[str, ModelStage] = {
-        "yolo11n": "GeneralObjectTrackerStage1",
-        "depth_anything_v2_vits": "DepthEstimationStage2",
-        Raft_Small_Weights : "RAFTDirectionEstimationStage3"
-
+        "yolo11n": ModelStage(
+            model_id="yolo11n",
+            stage=0,
+            stage_class=GeneralObjectTrackerStage1
+        ),
+        # "depth_anything_v2_vits": ModelStage(
+        #     model_id="depth_anything_v2_vits",
+        #     stage=1,
+        #     stage_class=DepthEstimationStage2
+        # ),
+        # "raft_small": ModelStage(
+        #     model_id="raft_small",
+        #     stage=2,
+        #     stage_class=RAFTDirectionEstimationStage3
+        # )
     }
 
     def __new__(cls):

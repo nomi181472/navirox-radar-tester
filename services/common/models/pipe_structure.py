@@ -1,17 +1,20 @@
-from pydantic import BaseModel,model_validator,Field
-from typing import Any,Optional,Type
+from pydantic import BaseModel,model_validator,Field,ConfigDict
+from typing import Any,Optional,Type,Dict
 from typing import List
 from enum import Enum
 import numpy as np
 from services.model.cfgs.ibase_stage import BaseStage
 
 class YoloCountItem(BaseModel):
-    detection: List[Any]
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    detection: List[Dict[str, Any]]
     total_detections: int
-    timestamp: Optional[str]
+    timestamp: str
     processing_success: bool
-    frame_base64: Optional[str] = None
+
     annotated_frame: Optional[np.ndarray] = None
+    frame_base64: Optional[str] = None
     error_message: Optional[str] = None
 
 
@@ -76,7 +79,6 @@ class Region(BaseModel):
                 raise ValueError("Line region must have exactly 2 points.")
             if self.object_moving_direction is None:
                 raise ValueError(
-                    f"object_moving_direction is null, when working with line tool it must have object_moving_direction object"
-                    f"any one from the values given [{RIGHT_TO_LEFT},{RIGHT_TO_LEFT},{UP_TO_DOWN},{DOWN_TO_UP}]")
+                    f"object_moving_direction is null, when working with line tool it must have object_moving_direction object")
 
         return self
