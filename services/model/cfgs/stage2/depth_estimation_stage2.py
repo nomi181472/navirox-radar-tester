@@ -27,7 +27,7 @@ class DepthEstimationStage2(BaseStage):
         model_path: str,
         model_id: str,
         encoder: str = "vits",
-        features: int = 128,
+        features: int = 64,
         out_channels: Optional[List[int]] = None,
         device: Optional[str] = None,
         depth_scale_factor: float = 10.0,
