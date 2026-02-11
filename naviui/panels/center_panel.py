@@ -8,7 +8,7 @@ Wires together:
     - PIPWindow         (click detail overlay)
 """
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QGraphicsView
@@ -19,6 +19,26 @@ from ..widgets import PIPWindow
 
 from services.managers.fusion_manager import FusionManager
 from services.inferenced_services.inference_service import run_inference, get_object_image
+
+
+class InferenceWorker(QObject):
+    """
+    Worker that runs inference for a single camera in a separate thread.
+    """
+    finished = pyqtSignal(int, list)  # camera_id, detections
+
+    def __init__(self, camera_id):
+        super().__init__()
+        self.camera_id = camera_id
+
+    def process(self):
+        """Perform inference and emit results."""
+        try:
+            detections = run_inference(camera_id=self.camera_id)
+            self.finished.emit(self.camera_id, detections)
+        except Exception as e:
+            print(f"Worker Error (CAM{self.camera_id}): {e}")
+            self.finished.emit(self.camera_id, [])
 
 
 class CenterPanel(QWidget):
@@ -62,6 +82,11 @@ class CenterPanel(QWidget):
         # Disable random radar generation - we'll generate from YOLO detections
         self.scene.obstacle_timer.stop()
         
+        # ----- Threading Setup -----
+        self.threads = {}
+        self.workers = {}
+        self._setup_inference_threads()
+        
         # Run YOLO inference and generate corresponding radar points
         self._cv_timer = QTimer(self)
         self._cv_timer.timeout.connect(self._run_yolo_and_generate_radar)
@@ -101,33 +126,48 @@ class CenterPanel(QWidget):
 
     # ----- YOLO + Radar Generation ----------------------------------------
 
+    def _setup_inference_threads(self):
+        """Initialize 4 dedicated threads for camera inference."""
+        for camera_id in range(1, 5):
+            self.threads[camera_id] = QThread()
+            self.workers[camera_id] = InferenceWorker(camera_id)
+            self.workers[camera_id].moveToThread(self.threads[camera_id])
+            self.workers[camera_id].finished.connect(self._on_inference_finished)
+            self.threads[camera_id].start()
+
+    def _on_inference_finished(self, camera_id, detections):
+        """Collect results from thread and trigger update."""
+        self.fusion_manager.update_cv_detections(detections, camera_id=camera_id)
+        # We don't trigger the whole radar generation here, 
+        # let the central timer handle synchronization if needed, 
+        # or trigger a map update.
+        # For now, we'll keep the timer-based generation but use the latest threaded data.
+        pass
+
     def _run_yolo_and_generate_radar(self):
         """
-        1. Run YOLO detection on video frames from all active cameras
-        2. For each YOLO detection, generate a corresponding radar/LiDAR point
-        3. Fuse them together
-        4. Display on tactical map
+        1. Trigger asynchronous inference on all active cameras
+        2. Generate corresponding radar points from current CV buffer
+        3. Display on tactical map
         """
         import random
         
         # Clear old obstacles first
         self._clear_old_obstacles()
         
-        # Run YOLO inference on all active cameras (1-4)
-        all_yolo_detections = []
-        
-        for camera_id in range(1, 5):  # Process cameras 1, 2, 3, 4
-            # Check if camera is enabled before running inference
+        # Trigger workers to run (asynchronously)
+        for camera_id in range(1, 5):
+            # Check if camera is enabled
             if self.left_panel and hasattr(self.left_panel, 'camera_cells'):
-                camera_cell = self.left_panel.camera_cells[camera_id - 1]  # 0-indexed
+                camera_cell = self.left_panel.camera_cells[camera_id - 1]
                 if not camera_cell.is_enabled:
-                    continue  # Skip disabled cameras
+                    continue
             
-            # Run inference for this camera
-            yolo_detections = run_inference(camera_id=camera_id)
-            
-            if yolo_detections:
-                all_yolo_detections.extend(yolo_detections)
+            # Start inference task for this camera
+            QTimer.singleShot(0, self.workers[camera_id].process)
+
+        # Get the latest detections from FusionManager (which are being updated by threads)
+        all_yolo_detections = self.fusion_manager.get_cv_detections()
         
         if not all_yolo_detections:
             return

@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +227,9 @@ class FusionManager:
 
         self._radar: List[Dict[str, Any]] = []
         self._cv: List[Dict[str, Any]] = []
+        self._cv_by_camera: Dict[int, List[Dict[str, Any]]] = {1: [], 2: [], 3: [], 4: []}
         self._fused: List[Dict[str, Any]] = []
+        self._lock = Lock()
 
     # ----- data ingestion ------------------------------------------------
 
@@ -234,103 +237,105 @@ class FusionManager:
         """Store the latest radar detection snapshot."""
         self._radar = list(detections)
 
-    def update_cv_detections(self, detections: List[Dict[str, Any]]) -> None:
+    def update_cv_detections(self, detections: List[Dict[str, Any]], camera_id: Optional[int] = None) -> None:
         """Store the latest CV/YOLO detection snapshot."""
-        self._cv = list(detections)
+        with self._lock:
+            if camera_id is not None:
+                self._cv_by_camera[camera_id] = list(detections)
+                # Rebuild full CV list from per-camera snapshots
+                all_cv = []
+                for cam_id in sorted(self._cv_by_camera.keys()):
+                    all_cv.extend(self._cv_by_camera[cam_id])
+                self._cv = all_cv
+            else:
+                self._cv = list(detections)
 
     # ----- core fusion ---------------------------------------------------
 
     def fuse(self) -> List[Dict[str, Any]]:
         """
         Run the 3-criteria association and return the fused detections.
-
-        Matching criteria (all must pass):
-            1. ``camera_id`` is identical
-            2. ``|timestamp_radar − timestamp_cv|`` ≤ max_time_delta_s
-            3. ``angle_distance(radar_angle, bbox_angle)`` ≤ max_angle_delta_deg
-
-        Association is *greedy*: lowest combined score matched first,
-        each detection used at most once.
-
-        Returns
-        -------
-        list[dict]
-            Fused detection records.
         """
-        # Pre-compute bbox angles for every CV detection
-        cv_with_angles = []
-        for det in self._cv:
-            bbox = det.get("bbox")
-            cam = det.get("camera_id", 0)
-            if bbox and cam in CAMERA_SECTORS:
-                est_angle = bbox_to_radar_angle(bbox, cam, self._frame_width)
-            else:
-                est_angle = None
-            cv_with_angles.append((det, est_angle))
+        with self._lock:
+            # Pre-compute bbox angles for every CV detection
+            cv_with_angles = []
+            for det in self._cv:
+                bbox = det.get("bbox")
+                cam = det.get("camera_id", 0)
+                if bbox and cam in CAMERA_SECTORS:
+                    est_angle = bbox_to_radar_angle(bbox, cam, self._frame_width)
+                else:
+                    est_angle = None
+                cv_with_angles.append((det, est_angle))
 
-        # Build candidate pairs  [(score, radar_idx, cv_idx)]
-        candidates: List[Tuple[float, int, int]] = []
-        for ri, r_det in enumerate(self._radar):
-            r_cam = r_det["camera_id"]
-            r_ts = r_det["timestamp"]
-            r_angle = r_det["angle"]
+            # Build candidate pairs  [(score, radar_idx, cv_idx)]
+            candidates: List[Tuple[float, int, int]] = []
+            for ri, r_det in enumerate(self._radar):
+                r_cam = r_det["camera_id"]
+                r_ts = r_det["timestamp"]
+                r_angle = r_det["angle"]
 
-            for ci, (c_det, c_angle) in enumerate(cv_with_angles):
-                # ---- criterion 1: camera_id ----
-                if c_det.get("camera_id") != r_cam:
+                for ci, (c_det, c_angle) in enumerate(cv_with_angles):
+                    # ---- criterion 1: camera_id ----
+                    if c_det.get("camera_id") != r_cam:
+                        continue
+
+                    # ---- criterion 2: timestamp ----
+                    dt = _time_delta_s(r_ts, c_det["timestamp"])
+                    if dt > self._max_time_delta:
+                        continue
+
+                    # ---- criterion 3: angle ----
+                    if c_angle is None:
+                        continue
+                    da = _angle_distance(r_angle, c_angle)
+                    if da > self._max_angle_delta:
+                        continue
+
+                    # Combined normalised score (lower = better)
+                    score = (dt / self._max_time_delta) + (da / self._max_angle_delta)
+                    candidates.append((score, ri, ci))
+
+            # Greedy 1-to-1 assignment (best score first)
+            candidates.sort(key=lambda x: x[0])
+            matched_radar: set = set()
+            matched_cv: set = set()
+            fused: List[Dict[str, Any]] = []
+
+            for score, ri, ci in candidates:
+                if ri in matched_radar or ci in matched_cv:
                     continue
+                matched_radar.add(ri)
+                matched_cv.add(ci)
 
-                # ---- criterion 2: timestamp ----
-                dt = _time_delta_s(r_ts, c_det["timestamp"])
-                if dt > self._max_time_delta:
-                    continue
+                r_det = self._radar[ri]
+                c_det, _ = cv_with_angles[ci]
 
-                # ---- criterion 3: angle ----
-                if c_angle is None:
-                    continue
-                da = _angle_distance(r_angle, c_angle)
-                if da > self._max_angle_delta:
-                    continue
+                fused.append(self._merge(r_det, c_det))
 
-                # Combined normalised score (lower = better)
-                score = (dt / self._max_time_delta) + (da / self._max_angle_delta)
-                candidates.append((score, ri, ci))
+            # Unmatched radar → include with class_name "UNKNOWN"
+            for ri, r_det in enumerate(self._radar):
+                if ri not in matched_radar:
+                    fused.append(self._radar_only(r_det))
 
-        # Greedy 1-to-1 assignment (best score first)
-        candidates.sort(key=lambda x: x[0])
-        matched_radar: set = set()
-        matched_cv: set = set()
-        fused: List[Dict[str, Any]] = []
+            # Unmatched CV → include without radar data
+            for ci, (c_det, _) in enumerate(cv_with_angles):
+                if ci not in matched_cv:
+                    fused.append(self._cv_only(c_det))
 
-        for score, ri, ci in candidates:
-            if ri in matched_radar or ci in matched_cv:
-                continue
-            matched_radar.add(ri)
-            matched_cv.add(ci)
-
-            r_det = self._radar[ri]
-            c_det, _ = cv_with_angles[ci]
-
-            fused.append(self._merge(r_det, c_det))
-
-        # Unmatched radar → include with class_name "UNKNOWN"
-        for ri, r_det in enumerate(self._radar):
-            if ri not in matched_radar:
-                fused.append(self._radar_only(r_det))
-
-        # Unmatched CV → include without radar data
-        for ci, (c_det, _) in enumerate(cv_with_angles):
-            if ci not in matched_cv:
-                fused.append(self._cv_only(c_det))
-
-        self._fused = fused
-        return fused
+            self._fused = fused
+            return fused
 
     # ----- accessors -----------------------------------------------------
 
     def get_fused_detections(self) -> List[Dict[str, Any]]:
         """Return the most recent fused result (call ``fuse()`` first)."""
         return list(self._fused)
+
+    def get_cv_detections(self) -> List[Dict[str, Any]]:
+        """Return combined CV detections from all cameras."""
+        with self._lock:
+            return list(self._cv)
 
     # ----- merge helpers (private) ---------------------------------------
 
