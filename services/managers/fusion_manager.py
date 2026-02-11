@@ -380,7 +380,7 @@ class FusionManager:
             "track_id":   cv["track_id"],
             "camera_id":  cv.get("camera_id"),
             "angle":      None,
-            "distance":   None,
+            "distance":   cv.get("distance"),  # Use distance if provided (e.g. from depth estimation)
             "bbox":       cv.get("bbox"),
             "class_name": cv.get("class_name", "UNKNOWN"),
             "confidence": cv.get("confidence"),

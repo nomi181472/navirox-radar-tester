@@ -3,7 +3,7 @@ Camera Cell Widget - Individual camera view with video playback and toggle contr
 """
 
 import time
-from PyQt6.QtCore import Qt, QUrl, QTimer
+from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -25,6 +25,8 @@ VIDEO_PATH = VIDEO_PATHS[1]
 
 class CameraCell(QFrame):
     """Individual camera view cell with video playback and toggle control."""
+    
+    camera_state_changed = pyqtSignal(int, bool, str)
     
     def __init__(self, camera_name: str, camera_id: int, parent=None):
         super().__init__(parent)
@@ -261,6 +263,9 @@ class CameraCell(QFrame):
         """Handle toggle state change - play/pause video."""
         self.is_enabled = state == 2  # Qt.CheckState.Checked = 2
         self._update_frame_style(self.is_enabled)
+        
+        # Emit signal to notify app
+        self.camera_state_changed.emit(self.camera_id, self.is_enabled, self.video_url or "")
         
         # Reset FPS tracking
         self.frame_count = 0

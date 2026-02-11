@@ -30,11 +30,13 @@ class InferenceWorker(QObject):
     def __init__(self, camera_id):
         super().__init__()
         self.camera_id = camera_id
+        self.radar_enabled = True
 
     def process(self):
         """Perform inference and emit results."""
         try:
-            detections = run_inference(camera_id=self.camera_id)
+            # Pass radar_enabled state to inference service
+            detections = run_inference(camera_id=self.camera_id, radar_enabled=self.radar_enabled)
             self.finished.emit(self.camera_id, detections)
         except Exception as e:
             print(f"Worker Error (CAM{self.camera_id}): {e}")
@@ -50,6 +52,7 @@ class CenterPanel(QWidget):
     def __init__(self, parent=None, left_panel=None):
         super().__init__(parent)
         self.left_panel = left_panel  # Reference to left panel for camera states
+        self.radar_enabled = True     # Default to Radar ON
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
@@ -144,6 +147,13 @@ class CenterPanel(QWidget):
         # For now, we'll keep the timer-based generation but use the latest threaded data.
         pass
 
+    def on_radar_toggled(self, enabled: bool):
+        """Handle radar enable/disable from LeftPanel."""
+        self.radar_enabled = enabled
+        # Update all workers
+        for worker in self.workers.values():
+            worker.radar_enabled = enabled
+
     def _run_yolo_and_generate_radar(self):
         """
         1. Trigger asynchronous inference on all active cameras
@@ -171,6 +181,14 @@ class CenterPanel(QWidget):
         
         if not all_yolo_detections:
             return
+            
+        # DEBUG: Print distance source and values
+        source = "RADAR (MOCK)" if self.radar_enabled else "DEPTH MODEL"
+        print(f"--- Distance Source: {source} ---")
+        for det in all_yolo_detections:
+            d_val = det.get("distance")
+            c_name = det.get("class_name", "UNKNOWN")
+            print(f"Object: {c_name}, Distance: {d_val}")
         
         # Generate radar points for each YOLO detection
         radar_detections = []
@@ -203,11 +221,25 @@ class CenterPanel(QWidget):
                 sector_min, sector_max = 315, 405  # 405 = 360 + 45 (wraps through 0°)
             
             # Generate distance based on bbox size (larger bbox = closer object)
-            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-            # Map area to distance: larger area = closer (100-400m range)
-            distance = 400 - (bbox_area / 10000.0) * 200
-            distance = max(100, min(400, distance))  # Clamp to 100-400m
-            
+            # If Radar is ON: Use mock logic (or real radar if connected)
+            if self.radar_enabled:
+                bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+                # Map area to distance: larger area = closer (100-400m range)
+                distance = 400 - (bbox_area / 10000.0) * 200
+                distance = max(100, min(400, distance))  # Clamp to 100-400m
+                distance += random.uniform(-20, 20)
+            else:
+                # If Radar is OFF: Use estimated depth from model
+                # The depth estimation might be None if failed or not yet available
+                est_distance = yolo_det.get("distance")
+                if est_distance is not None:
+                    distance = float(est_distance)
+                    # No clamping strictly needed, but let's be safe for visual
+                    distance = max(1, min(1000, distance))
+                else:
+                    # Fallback if no depth yet (e.g. initial frames)
+                    continue
+
             # Add small random variation but clamp to stay within camera sector
             random_angle_offset = random.uniform(-3, 3)  # Reduced from ±5 to ±3
             angle += random_angle_offset
@@ -225,7 +257,6 @@ class CenterPanel(QWidget):
                 # Regular sectors: just clamp
                 angle = max(sector_min, min(sector_max, angle))
             
-            distance += random.uniform(-20, 20)
             
             # Add radar point to tactical map with correct camera_id
             obstacle_id = self.scene.add_obstacle_polar(angle, distance, camera_id=camera_id)

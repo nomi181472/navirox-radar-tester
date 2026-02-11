@@ -82,8 +82,8 @@ class DepthEstimationStage2(BaseStage):
         state_dict = torch.load(model_path, map_location="cpu")
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
-
-
+            
+        self.model.load_state_dict(state_dict)
 
         self.model.to(self.device).eval()
         print(f"[DepthEstimationStage2] Model loaded on {self.device}")
@@ -126,6 +126,9 @@ class DepthEstimationStage2(BaseStage):
 
         # Use maximum depth in the region as distance estimate
         # You can also use: mean, median, or percentile
+        # DEBUG: Print depth stats
+        # print(f"Object Depth - Min: {np.min(obj_depth):.4f}, Max: {np.max(obj_depth):.4f}, Mean: {np.mean(obj_depth):.4f}")
+        
         distance = float(np.mean(obj_depth)) * self.depth_scale_factor
 
         return distance

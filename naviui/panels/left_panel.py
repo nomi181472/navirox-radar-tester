@@ -2,7 +2,7 @@
 Left Panel - Camera grid and radar controls.
 """
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFormLayout,
@@ -14,6 +14,9 @@ from ..widgets import ToggleSwitch, CameraCell, HeatmapRow
 
 class LeftPanel(QWidget):
     """Left control panel with camera grid and radar controls."""
+    
+    camera_control_signal = pyqtSignal(int, bool, str)
+    radar_system_signal = pyqtSignal(bool)
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -33,6 +36,7 @@ class LeftPanel(QWidget):
         self.camera_cells = []
         for i, cam_name in enumerate(cameras):
             cell = CameraCell(cam_name, i + 1)
+            cell.camera_state_changed.connect(self.camera_control_signal.emit)
             self.camera_cells.append(cell)
             grid.addWidget(cell, i // 2, i % 2)
         
@@ -58,6 +62,18 @@ class LeftPanel(QWidget):
         radar_layout = QFormLayout(radar_group)
         radar_layout.setSpacing(10)
         radar_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        
+        # Radar System Toggle
+        radar_toggle_row = QHBoxLayout()
+        radar_toggle_label = QLabel("Radar System")
+        radar_toggle_label.setStyleSheet("color: #B0BEC5; font-weight: bold;")
+        self.radar_toggle = ToggleSwitch()
+        self.radar_toggle.setChecked(True)
+        self.radar_toggle.stateChanged.connect(self._on_radar_toggled)
+        radar_toggle_row.addWidget(radar_toggle_label)
+        radar_toggle_row.addStretch()
+        radar_toggle_row.addWidget(self.radar_toggle)
+        radar_layout.addRow("", radar_toggle_row)
         
         # Radar Height
         self.height_spin = QDoubleSpinBox()
@@ -134,3 +150,10 @@ class LeftPanel(QWidget):
         layout.addWidget(camera_group)
         layout.addWidget(radar_group)
         layout.addStretch()
+
+    def _on_radar_toggled(self, state):
+        """Handle radar system toggle state change."""
+        # 0: Unchecked (OFF), 2: Checked (ON)
+        # If checked (ON), radar is enabled. If unchecked (OFF), depth estimation is used.
+        enabled = (state == 2)
+        self.radar_system_signal.emit(enabled)

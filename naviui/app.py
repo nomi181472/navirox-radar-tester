@@ -88,3 +88,6 @@ class MainWindow(QMainWindow):
         lp.curvature_toggle.stateChanged.connect(
             lambda state: scene.update_topographical_view(state == 2)
         )
+        
+        # Radar System Toggle -> Switch between Radar and Depth Estimation
+        lp.radar_system_signal.connect(self.center_panel.on_radar_toggled)
