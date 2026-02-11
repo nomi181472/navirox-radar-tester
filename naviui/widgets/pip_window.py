@@ -2,6 +2,7 @@
 PIP Window Widget - Picture-in-Picture floating overlay for radar obstacle details.
 """
 
+import cv2
 from PyQt6.QtCore import Qt, QTimer, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPixmap, QPen, QLinearGradient
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel
@@ -15,8 +16,8 @@ class PIPWindow(QFrame):
     # Image mapping: obstacle type -> image file path
     # Keys include both uppercase radar-era names AND lowercase YOLO class names.
     IMAGE_MAP = {
-        "PERSON":       r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/person_water.png",
-        "person":       r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/person_water.png",
+        # "PERSON":       r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/person_water.png",
+        # "person":       r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/person_water.png",
         "SHIP":         r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/ship_water.png",
         "vessel-ship":  r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/ship_water.png",
         "BOAT":         r"https://ai-public-videos.s3.us-east-2.amazonaws.com/Raw+Videos/Navirox/images_ui_demo/ship_water.png",
@@ -113,8 +114,18 @@ class PIPWindow(QFrame):
         # Hide by default
         self.hide()
     
-    def show_obstacle(self, camera_num: int, obstacle_type: str, angle: float, distance: float, rtrack_id: int = 0, track_id: int = None):
-        """Show PIP window with specific obstacle data."""
+    def show_obstacle(self, camera_num: int, obstacle_type: str, angle: float, distance: float, rtrack_id: int = 0, track_id: int = None, object_image=None):
+        """Show PIP window with specific obstacle data.
+        
+        Args:
+            camera_num: Camera ID
+            obstacle_type: Object class name
+            angle: Angle in degrees
+            distance: Distance in meters
+            rtrack_id: Radar track ID
+            track_id: YOLO track ID
+            object_image: Cropped object image (numpy array or QPixmap)
+        """
         # Get color for this type
         color = self.COLOR_MAP.get(obstacle_type, "#9E9E9E")
         self.current_color = color
@@ -137,12 +148,21 @@ class PIPWindow(QFrame):
         trk_part = f" TRK-{track_id}" if track_id is not None else ""
         self.info_label.setText(f"RTRK-{rtrack_id}{trk_part} | {angle:.1f}° | {distance:.0f}m")
         
-        # Load appropriate image
-        image_path = self.IMAGE_MAP.get(obstacle_type)
-        pixmap = self._load_image(image_path) if image_path else QPixmap()
+        # Load object image
+        pixmap = None
+        
+        # Priority 1: Use provided object_image (from YOLO detection)
+        if object_image is not None:
+            pixmap = self._convert_to_pixmap(object_image)
+        
+        # Priority 2: Load from IMAGE_MAP (fallback)
+        if pixmap is None or pixmap.isNull():
+            image_path = self.IMAGE_MAP.get(obstacle_type)
+            if image_path:
+                pixmap = self._load_image(image_path)
 
-        if pixmap.isNull():
-            # Create UNKNOWN placeholder image with bbox
+        # Priority 3: Create UNKNOWN placeholder
+        if pixmap is None or pixmap.isNull():
             pixmap = self._create_unknown_image(obstacle_type)
         
         # Scale to fit
@@ -159,6 +179,34 @@ class PIPWindow(QFrame):
         
         # Show the window
         self.show()
+    
+    def _convert_to_pixmap(self, image) -> QPixmap:
+        """Convert numpy array or image to QPixmap."""
+        import numpy as np
+        
+        if isinstance(image, QPixmap):
+            return image
+        
+        if isinstance(image, np.ndarray):
+            # Convert BGR (OpenCV) to RGB
+            if len(image.shape) == 3 and image.shape[2] == 3:
+                image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            else:
+                image_rgb = image
+            
+            # Convert to QPixmap
+            from PyQt6.QtGui import QImage
+            h, w = image_rgb.shape[:2]
+            if len(image_rgb.shape) == 3:
+                bytes_per_line = 3 * w
+                q_image = QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            else:
+                bytes_per_line = w
+                q_image = QImage(image_rgb.data, w, h, bytes_per_line, QImage.Format.Format_Grayscale8)
+            
+            return QPixmap.fromImage(q_image)
+        
+        return QPixmap()
     
     def _load_image(self, image_path: str) -> QPixmap:
         """Load an image from a URL or local file path."""

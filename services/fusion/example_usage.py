@@ -85,26 +85,26 @@ class ContinuousFusionDemo:
         for i in range(num_detections):
             # Randomly decide sensor scenario
             scenario = random.choice([
-                "both",          # Camera + LiDAR (70% chance)
+                "both",          # Camera + LiDAR (85% chance)
                 "both",
                 "both",
                 "both",
                 "both",
                 "both",
                 "both",
-                "both",  # Camera + LiDAR (70% chance)
                 "both",
                 "both",
                 "both",
                 "both",
                 "both",
                 "both",
-                "both",  # Camera + LiDAR (70% chance)
                 "both",
                 "both",
-                "camera_only",   # Camera only (20% chance)
+                "both",
+                "both",
+                "camera_only",   # Camera only (10% chance)
                 "camera_only",
-                "lidar_only"     # LiDAR only (10% chance)
+                "lidar_only"     # LiDAR only (5% chance)
             ])
             
             if scenario == "both":

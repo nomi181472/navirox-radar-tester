@@ -1,18 +1,15 @@
 """
-Inference Service — Dummy implementation for development & integration testing.
+Inference Service — Real YOLO implementation for object detection.
 
-Generates synthetic detections that match the Ultralytics YOLO tracking output
-contract.  Every public function in this module is designed as a **drop-in
-placeholder**: when the real model is ready, replace the body of
-`run_inference()` with an actual `model.track(frame, ...)` call and feed the
-Results through `DetectionDataLoader.load()`.
+Uses Ultralytics YOLO11 model to detect and track objects in video frames.
+Processes video stream and generates detections with tracking information.
 
-Output schema per detection (mirrors YOLO + BoT-SORT / ByteTrack):
+Output schema per detection (YOLO + BoT-SORT / ByteTrack):
 {
     "track_id":   int,          # Unique tracker-assigned ID
     "camera_id":  int,          # Source camera identifier
     "bbox":       [x1, y1, x2, y2],  # Pixel coords, absolute (float)
-    "class_name": str,          # One of SUPPORTED_CLASSES
+    "class_name": str,          # Detected object class
     "confidence": float,        # 0.0 – 1.0
     "timestamp":  str           # ISO-8601 UTC string
 }
@@ -20,54 +17,44 @@ Output schema per detection (mirrors YOLO + BoT-SORT / ByteTrack):
 
 from __future__ import annotations
 
-import random
-import time
+import cv2
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# Import video paths from camera cell
+from naviui.widgets.camera_cell import VIDEO_PATHS
 
-SUPPORTED_CLASSES: List[str] = [
-    "vessel-ship",
-    "vessel-boat",
-    "person",
-    "vessel-jetski",
-]
-
-# Default frame dimensions (width, height) used when no frame is provided.
-_DEFAULT_FRAME_W = 1920
-_DEFAULT_FRAME_H = 1080
-
-# Bounding-box size ranges per class (min_w, max_w, min_h, max_h) in pixels.
-# Tuned for a typical maritime surveillance scene.
-_BBOX_SIZE_RANGES: Dict[str, Dict[str, int]] = {
-    "vessel-ship":   {"min_w": 200, "max_w": 600, "min_h": 100, "max_h": 300},
-    "vessel-boat":   {"min_w": 80,  "max_w": 250, "min_h": 40,  "max_h": 130},
-    "person":        {"min_w": 30,  "max_w": 80,  "min_h": 60,  "max_h": 180},
-    "vessel-jetski": {"min_w": 50,  "max_w": 150, "min_h": 30,  "max_h": 90},
-}
-
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
+    print("⚠️  Ultralytics not installed. Install with: pip install ultralytics")
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Configuration
 # ---------------------------------------------------------------------------
 
-def _generate_bbox(
-    class_name: str,
-    frame_w: int = _DEFAULT_FRAME_W,
-    frame_h: int = _DEFAULT_FRAME_H,
-) -> List[float]:
-    """Return a random [x1, y1, x2, y2] bbox that fits within the frame."""
-    size = _BBOX_SIZE_RANGES[class_name]
-    w = random.randint(size["min_w"], size["max_w"])
-    h = random.randint(size["min_h"], size["max_h"])
-    x1 = random.randint(0, max(0, frame_w - w))
-    y1 = random.randint(0, max(0, frame_h - h))
-    return [float(x1), float(y1), float(x1 + w), float(y1 + h)]
+# Model path (will download YOLO11n if not present)
+MODEL_NAME = "yolo11n.pt"
+
+# Keep original YOLO class names (no mapping)
+CLASS_MAPPING = {}
+
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
+
+_model: Optional['YOLO'] = None
+_video_captures: Dict[int, cv2.VideoCapture] = {}  # Dict to store multiple video captures
+_current_frame: Optional[np.ndarray] = None
+_frame_counter = 0
+
+# Store cropped object images by track_id
+_object_images: Dict[int, np.ndarray] = {}
 
 
 def _iso_timestamp() -> str:
@@ -75,25 +62,58 @@ def _iso_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---------------------------------------------------------------------------
-# Track-ID state  (simple auto-increment; mirrors YOLO tracker behaviour)
-# ---------------------------------------------------------------------------
-
-_next_track_id: int = 1
-
-
-def _get_next_track_id() -> int:
-    """Thread-unsafe auto-increment — fine for a single-threaded dummy."""
-    global _next_track_id
-    tid = _next_track_id
-    _next_track_id += 1
-    return tid
+def _initialize_model():
+    """Initialize YOLO model (lazy initialization)."""
+    global _model
+    if _model is None and YOLO_AVAILABLE:
+        try:
+            _model = YOLO(MODEL_NAME)
+            print(f"✅ YOLO model loaded: {MODEL_NAME}")
+        except Exception as e:
+            print(f"❌ Failed to load YOLO model: {e}")
+            _model = None
+    return _model
 
 
-def reset_track_ids() -> None:
-    """Reset the dummy track-ID counter.  Useful between test runs."""
-    global _next_track_id
-    _next_track_id = 1
+def get_current_frame(camera_id: int = 1) -> Optional[np.ndarray]:
+    """Get current frame from specific camera."""
+    global _video_captures, _current_frame, _frame_counter
+    
+    # Initialize video capture for this camera if not exists
+    if camera_id not in _video_captures:
+        try:
+            # Use camera-specific video path
+            video_path = VIDEO_PATHS.get(camera_id, VIDEO_PATHS[1])
+            _video_captures[camera_id] = cv2.VideoCapture(video_path)
+            if _video_captures[camera_id].isOpened():
+                print(f"✅ Video opened for CAM{camera_id}: {video_path}")
+            else:
+                print(f"❌ Failed to open video for CAM{camera_id}: {video_path}")
+                del _video_captures[camera_id]
+                return None
+        except Exception as e:
+            print(f"❌ Error opening video for CAM{camera_id}: {e}")
+            return None
+    
+    cap = _video_captures[camera_id]
+    if not cap.isOpened():
+        return None
+    
+    # Read next frame
+    ret, frame = cap.read()
+    
+    if not ret:
+        # Loop video
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ret, frame = cap.read()
+        _frame_counter = 0
+    
+    if ret:
+        _current_frame = frame
+        _frame_counter += 1
+        return frame
+    
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -103,66 +123,114 @@ def reset_track_ids() -> None:
 def run_inference(
     frame: Optional[np.ndarray] = None,
     *,
-    camera_id: int = 0,
-    min_detections: int = 1,
-    max_detections: int = 3,
-    class_names: Optional[List[str]] = None,
+    camera_id: int = 1,
+    **kwargs
 ) -> List[Dict[str, Any]]:
     """
-    Generate dummy detections for a single frame.
+    Run YOLO inference on video frame and return detections with tracking.
 
     Parameters
     ----------
     frame : np.ndarray | None
-        The input video frame (H, W, C).  Used only to derive resolution.
-        When *None*, ``_DEFAULT_FRAME_W x _DEFAULT_FRAME_H`` is assumed.
+        The input video frame (H, W, C). If None, reads next frame from video.
 
     camera_id : int
-        Identifier for the source camera.  Passed through to every
-        detection dict so downstream consumers know which feed the
-        detection originated from.
-
-    min_detections / max_detections : int
-        Range for the random number of detections per frame.
-
-    class_names : list[str] | None
-        Subset of ``SUPPORTED_CLASSES`` to sample from.
-        Defaults to all supported classes.
+        Identifier for the source camera.
 
     Returns
     -------
     list[dict]
-        Each dict follows the schema documented at module level.
-
-    TODO: Replace this function body with real Ultralytics inference:
-        >>> from ultralytics import YOLO
-        >>> model = YOLO("best.pt")
-        >>> results = model.track(frame, persist=True, conf=0.5)
-        >>> detections = DetectionDataLoader().load(results)
+        Each dict contains: track_id, camera_id, bbox, class_name, confidence, timestamp
     """
-
-    if class_names is None:
-        class_names = SUPPORTED_CLASSES
-
-    # Derive frame size
-    if frame is not None:
-        frame_h, frame_w = frame.shape[:2]
-    else:
-        frame_w, frame_h = _DEFAULT_FRAME_W, _DEFAULT_FRAME_H
-
-    num_detections = random.randint(min_detections, max_detections)
+    
+    # Get frame from specific camera if not provided
+    if frame is None:
+        frame = get_current_frame(camera_id)
+    
+    if frame is None:
+        return []
+    
+    # Initialize model
+    model = _initialize_model()
+    if model is None or not YOLO_AVAILABLE:
+        return []
+    
     timestamp = _iso_timestamp()
-
     detections: List[Dict[str, Any]] = []
-    for _ in range(num_detections):
-        cls = random.choice(class_names)
-        detections.append({
-            "track_id":   _get_next_track_id(),
-            "camera_id":  camera_id,
-            "bbox":       _generate_bbox(cls, frame_w, frame_h),
-            "class_name": cls,
-            "confidence": round(random.uniform(0.45, 0.99), 4),
-            "timestamp":  timestamp,
-        })
-
+    
+    try:
+        # Run YOLO tracking
+        results = model.track(frame, persist=True, conf=0.3, verbose=False)
+        
+        if not results or len(results) == 0:
+            return []
+        
+        result = results[0]
+        
+        if result.boxes is None or len(result.boxes) == 0:
+            return []
+        
+        # Process each detection
+        for box in result.boxes:
+            # Get class name
+            class_id = int(box.cls[0])
+            class_name = result.names[class_id]
+            
+            # Keep original class name (no mapping)
+            mapped_class = class_name
+            
+            # Get bbox coordinates
+            bbox = box.xyxy[0].cpu().numpy().tolist()
+            x1, y1, x2, y2 = map(int, bbox)
+            
+            # Get track ID if available
+            track_id = int(box.id[0]) if box.id is not None else None
+            
+            # Crop object from frame and store
+            if track_id is not None and frame is not None:
+                # Add padding to crop
+                padding = 10
+                x1_crop = max(0, x1 - padding)
+                y1_crop = max(0, y1 - padding)
+                x2_crop = min(frame.shape[1], x2 + padding)
+                y2_crop = min(frame.shape[0], y2 + padding)
+                
+                # Crop object image
+                object_crop = frame[y1_crop:y2_crop, x1_crop:x2_crop].copy()
+                _object_images[track_id] = object_crop
+            
+            # Get confidence
+            confidence = float(box.conf[0])
+            
+            # Create detection dictionary
+            detection = {
+                "track_id": track_id,
+                "camera_id": camera_id,
+                "bbox": bbox,
+                "class_name": mapped_class,
+                "confidence": confidence,
+                "timestamp": timestamp
+            }
+            
+            detections.append(detection)
+        
+    except Exception as e:
+        print(f"❌ Inference error: {e}")
+        return []
+    
     return detections
+
+
+def cleanup():
+    """Release video capture resources."""
+    global _video_captures, _object_images
+    for camera_id, cap in _video_captures.items():
+        if cap is not None:
+            cap.release()
+    _video_captures.clear()
+    _object_images.clear()
+
+
+def get_object_image(track_id: int) -> Optional[np.ndarray]:
+    """Get cropped object image by track ID."""
+    return _object_images.get(track_id)

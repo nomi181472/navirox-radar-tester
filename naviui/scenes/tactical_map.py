@@ -188,7 +188,7 @@ class TacticalMapScene(QGraphicsScene):
         else:
             return 4
     
-    def add_obstacle_polar(self, angle: float, distance: float) -> int:
+    def add_obstacle_polar(self, angle: float, distance: float, camera_id: int = None) -> int:
         """
         Add an obstacle at given polar coordinates.
         
@@ -198,6 +198,7 @@ class TacticalMapScene(QGraphicsScene):
         Args:
             angle: Azimuth angle in degrees (0° = North, clockwise)
             distance: Distance/Range in meters
+            camera_id: Camera ID (if None, will be calculated from angle)
         
         Returns:
             Obstacle ID (internal), or -1 if out of visible range.
@@ -205,7 +206,10 @@ class TacticalMapScene(QGraphicsScene):
         obstacle_id = self.obstacle_id_counter
         self.obstacle_id_counter += 1
         
-        camera_id = self._angle_to_camera_id(angle)
+        # Use provided camera_id or calculate from angle
+        if camera_id is None:
+            camera_id = self._angle_to_camera_id(angle)
+        
         rtrack_id = self._next_rtrack_id()
         timestamp = self._iso_timestamp()
         color = self.RADAR_MARKER["color"]
@@ -366,14 +370,23 @@ class TacticalMapScene(QGraphicsScene):
         if not class_name:
             return "#29B6F6"  # Default cyan
         
-        # Color mapping for different object types
+        # Color mapping for different object types (YOLO COCO classes + maritime)
         class_colors = {
+            # YOLO COCO classes
+            "car": "#FF5722",             # Red-orange - cars
+            "truck": "#FF6F00",           # Dark orange - trucks
+            "bus": "#E65100",             # Deep orange - buses
+            "motorcycle": "#9C27B0",      # Purple - motorcycles
+            "bicycle": "#673AB7",         # Deep purple - bicycles
+            "person": "#FFEB3B",          # Yellow - person
+            "dog": "#8BC34A",             # Light green - dog
+            "cat": "#4CAF50",             # Green - cat
+            # Maritime classes
             "vessel-ship": "#FF5722",    # Deep orange - large vessels
             "vessel-boat": "#FF9800",    # Orange - smaller boats
             "boat": "#FF9800",            # Orange
             "ship": "#FF5722",            # Deep orange
             "vessel": "#FF9800",          # Orange
-            "person": "#FFEB3B",          # Yellow - person/swimmer
             "swimmer": "#FFEB3B",         # Yellow
             "vessel-jetski": "#00E676",  # Green - jetski
             "jetski": "#00E676",          # Green
@@ -453,11 +466,18 @@ class TacticalMapScene(QGraphicsScene):
         if confidence:
             label_text += f" ({confidence:.0%})"
         
-        # Color based on class
+        # Color based on class (YOLO + maritime classes)
         color_map = {
+            # YOLO COCO classes
+            "car": "#FF5722",             # Red-orange
+            "truck": "#FF6F00",           # Dark orange
+            "bus": "#E65100",             # Deep orange
+            "motorcycle": "#9C27B0",      # Purple
+            "bicycle": "#673AB7",         # Deep purple
+            "person": "#FFEB3B",          # Yellow
+            # Maritime classes
             "vessel-ship": "#29B6F6",    # Blue
             "vessel-boat": "#66BB6A",    # Green
-            "person": "#FFA726",         # Orange
             "vessel-jetski": "#AB47BC",  # Purple
         }
         label_color = color_map.get(class_name, "#29B6F6")

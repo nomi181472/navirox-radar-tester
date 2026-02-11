@@ -18,7 +18,7 @@ from ..scenes import TacticalMapScene
 from ..widgets import PIPWindow
 
 from services.managers.fusion_manager import FusionManager
-from services.inferenced_services.inference_service import run_inference
+from services.inferenced_services.inference_service import run_inference, get_object_image
 
 
 class CenterPanel(QWidget):
@@ -27,8 +27,9 @@ class CenterPanel(QWidget):
     # How often (ms) the dummy CV inference runs for each camera
     _CV_INFERENCE_INTERVAL_MS = 3000
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, left_panel=None):
         super().__init__(parent)
+        self.left_panel = left_panel  # Reference to left panel for camera states
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
@@ -55,17 +56,15 @@ class CenterPanel(QWidget):
         # ----- Fusion Manager -----
         self.fusion_manager = FusionManager()
         
-        # Feed radar detections into fusion manager and immediately run fusion
-        self.scene.radar_detections_updated.connect(
-            self._on_radar_detections_updated
-        )
-        
         # When an obstacle is clicked, look up fused data and show PIP
         self.scene.obstacle_clicked.connect(self._on_obstacle_clicked)
         
-        # Periodic dummy CV inference (simulates YOLO running on all 4 cameras)
+        # Disable random radar generation - we'll generate from YOLO detections
+        self.scene.obstacle_timer.stop()
+        
+        # Run YOLO inference and generate corresponding radar points
         self._cv_timer = QTimer(self)
-        self._cv_timer.timeout.connect(self._run_cv_inference)
+        self._cv_timer.timeout.connect(self._run_yolo_and_generate_radar)
         self._cv_timer.start(self._CV_INFERENCE_INTERVAL_MS)
         
         # Coordinate info bar
@@ -100,41 +99,143 @@ class CenterPanel(QWidget):
         layout.addWidget(container, 1)
         layout.addWidget(coord_bar)
 
-    # ----- Radar detection handler ----------------------------------------
+    # ----- YOLO + Radar Generation ----------------------------------------
 
-    def _on_radar_detections_updated(self, radar_detections):
+    def _run_yolo_and_generate_radar(self):
         """
-        Called whenever radar detections change. Immediately run CV inference
-        and fusion to classify new detections without delay.
+        1. Run YOLO detection on video frames from all active cameras
+        2. For each YOLO detection, generate a corresponding radar/LiDAR point
+        3. Fuse them together
+        4. Display on tactical map
+        """
+        import random
         
-        Args:
-            radar_detections: List of radar detection dictionaries
-        """
-        # Update fusion manager with radar data
+        # Clear old obstacles first
+        self._clear_old_obstacles()
+        
+        # Run YOLO inference on all active cameras (1-4)
+        all_yolo_detections = []
+        
+        for camera_id in range(1, 5):  # Process cameras 1, 2, 3, 4
+            # Check if camera is enabled before running inference
+            if self.left_panel and hasattr(self.left_panel, 'camera_cells'):
+                camera_cell = self.left_panel.camera_cells[camera_id - 1]  # 0-indexed
+                if not camera_cell.is_enabled:
+                    continue  # Skip disabled cameras
+            
+            # Run inference for this camera
+            yolo_detections = run_inference(camera_id=camera_id)
+            
+            if yolo_detections:
+                all_yolo_detections.extend(yolo_detections)
+        
+        if not all_yolo_detections:
+            return
+        
+        # Generate radar points for each YOLO detection
+        radar_detections = []
+        
+        for yolo_det in all_yolo_detections:
+            # Calculate angle from bbox position (simulate radar angle from camera view)
+            bbox = yolo_det.get("bbox", [0, 0, 1920, 1080])
+            bbox_center_x = (bbox[0] + bbox[2]) / 2
+            bbox_center_y = (bbox[1] + bbox[3]) / 2
+            
+            # Map bbox position to radar angle (0-360°)
+            # Normalize x position to 0-1, then map to camera sector
+            camera_id = yolo_det.get("camera_id", 1)
+            normalized_x = bbox_center_x / 1920.0  # Assuming 1920px width
+            
+            # Camera sectors: CAM1 (45-135°), CAM2 (135-225°), CAM3 (225-315°), CAM4 (315-45°)
+            if camera_id == 1:
+                angle = 45 + (normalized_x * 90)  # Map to 45-135° range
+                sector_min, sector_max = 45, 135
+            elif camera_id == 2:
+                angle = 135 + (normalized_x * 90)
+                sector_min, sector_max = 135, 225
+            elif camera_id == 3:
+                angle = 225 + (normalized_x * 90)
+                sector_min, sector_max = 225, 315
+            else:  # camera_id == 4
+                angle = 315 + (normalized_x * 90)
+                if angle >= 360:
+                    angle -= 360
+                sector_min, sector_max = 315, 405  # 405 = 360 + 45 (wraps through 0°)
+            
+            # Generate distance based on bbox size (larger bbox = closer object)
+            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            # Map area to distance: larger area = closer (100-400m range)
+            distance = 400 - (bbox_area / 10000.0) * 200
+            distance = max(100, min(400, distance))  # Clamp to 100-400m
+            
+            # Add small random variation but clamp to stay within camera sector
+            random_angle_offset = random.uniform(-3, 3)  # Reduced from ±5 to ±3
+            angle += random_angle_offset
+            
+            # Clamp angle to camera sector boundaries
+            if camera_id == 4:
+                # Special handling for CAM4 wrap-around sector (315-360° and 0-45°)
+                # Convert to 315-405° range for clamping, then normalize back
+                if angle < 180:  # It's in the 0-45° part
+                    angle += 360  # Convert to 360-405° range
+                angle = max(sector_min, min(sector_max, angle))
+                if angle >= 360:
+                    angle -= 360  # Normalize back to 0-360°
+            else:
+                # Regular sectors: just clamp
+                angle = max(sector_min, min(sector_max, angle))
+            
+            distance += random.uniform(-20, 20)
+            
+            # Add radar point to tactical map with correct camera_id
+            obstacle_id = self.scene.add_obstacle_polar(angle, distance, camera_id=camera_id)
+            
+            if obstacle_id >= 0:
+                # Get the radar detection that was just added
+                radar_det = None
+                for obs_id, obs_data in self.scene.obstacles.items():
+                    if obs_id == obstacle_id:
+                        radar_det = {
+                            "rtrack_id": obs_data["rtrack_id"],
+                            "camera_id": obs_data["camera_id"],
+                            "angle": obs_data["angle"],
+                            "distance": obs_data["distance"],
+                            "timestamp": obs_data["timestamp"],
+                        }
+                        radar_detections.append(radar_det)
+                        break
+        
+        # Update fusion manager with both radar and YOLO detections
         self.fusion_manager.update_radar_detections(radar_detections)
+        self.fusion_manager.update_cv_detections(all_yolo_detections)
         
-        # Immediately run CV inference and fusion to get classifications
-        self._run_cv_inference()
-
-    # ----- CV inference (dummy) ------------------------------------------
-
-    def _run_cv_inference(self):
-        """
-        Simulate YOLO inference on all 4 cameras, feed results into
-        the fusion manager, and trigger fusion.
-
-        TODO: Replace with real per-camera frame capture + model.track().
-        """
-        all_cv_dets = []
-        for cam_id in range(1, 5):
-            dets = run_inference(camera_id=cam_id)
-            all_cv_dets.extend(dets)
-
-        self.fusion_manager.update_cv_detections(all_cv_dets)
+        # Run fusion
         fused_results = self.fusion_manager.fuse()
         
-        # Update tactical map with fused detections (add class labels)
+        # Update tactical map with fused detections
         self._update_map_with_fused_detections(fused_results)
+    
+    def _clear_old_obstacles(self):
+        """Clear obstacles older than 10 seconds to prevent overcrowding."""
+        from datetime import datetime, timezone
+        
+        current_time = datetime.now(timezone.utc)
+        max_age_seconds = 10
+        
+        to_remove = []
+        for obs_id, obs_data in list(self.scene.obstacles.items()):
+            timestamp_str = obs_data.get("timestamp")
+            if timestamp_str:
+                try:
+                    obs_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    age = (current_time - obs_time).total_seconds()
+                    if age > max_age_seconds:
+                        to_remove.append(obs_id)
+                except (ValueError, AttributeError):
+                    pass
+        
+        for obs_id in to_remove:
+            self.scene.remove_obstacle(obs_id)
 
     def _update_map_with_fused_detections(self, fused_results):
         """
@@ -192,6 +293,7 @@ class CenterPanel(QWidget):
                 break
         
         # Get class name from obstacle data if available (already classified)
+        object_image = None
         if obstacle_data and "class_name" in obstacle_data:
             class_name = obstacle_data.get("class_name")
             # Find track_id from fusion manager
@@ -201,6 +303,10 @@ class CenterPanel(QWidget):
                 None,
             )
             track_id = record.get("track_id") if record else None
+            
+            # Get the cropped object image if we have a track_id
+            if track_id is not None:
+                object_image = get_object_image(track_id)
         else:
             # Not yet classified — show as UNKNOWN
             class_name = "UNKNOWN"
@@ -213,6 +319,7 @@ class CenterPanel(QWidget):
             distance=distance,
             rtrack_id=rtrack_id,
             track_id=track_id,
+            object_image=object_image,
         )
 
     # ----- Layout helpers -------------------------------------------------

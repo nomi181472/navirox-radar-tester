@@ -37,7 +37,7 @@ class MainWindow(QMainWindow):
         
         # Create panels
         self.left_panel = LeftPanel()
-        self.center_panel = CenterPanel()
+        self.center_panel = CenterPanel(left_panel=self.left_panel)
         self.right_panel = RightPanel()
         
         # Set stretch factors for 25% | 55% | 20% layout
