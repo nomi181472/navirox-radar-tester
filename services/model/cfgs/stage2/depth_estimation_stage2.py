@@ -30,7 +30,7 @@ class DepthEstimationStage2(BaseStage):
         features: int = 64,
         out_channels: Optional[List[int]] = None,
         device: Optional[str] = None,
-        depth_scale_factor: float = 10.0,
+        depth_scale_factor: float = 5.0,
         exclude_classes: Optional[List[str]] = None,
     ):
         """
