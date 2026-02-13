@@ -9,7 +9,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QFont, QImage, QPixmap
-from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit
+from PyQt6.QtWidgets import QFrame, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 
@@ -35,6 +35,7 @@ class CameraCell(QFrame):
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.is_enabled = False  # Start OFFLINE
+        self.is_video_visible = False  # Track if user wants to see video
         self.setObjectName("cameraCell")
         self._update_frame_style(False)
 
@@ -109,6 +110,83 @@ class CameraCell(QFrame):
         """)
         self.offline_label.setMinimumHeight(80)
         self.offline_label.hide()
+        
+        # Online status container with See Video button
+        self.online_container = QFrame()
+        self.online_container.setStyleSheet("""
+            background: #1a1a1a; 
+            border-radius: 4px;
+        """)
+        self.online_container.setMinimumHeight(80)
+        online_layout = QVBoxLayout(self.online_container)
+        online_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        online_layout.setSpacing(8)
+        
+        online_status_label = QLabel("ONLINE")
+        online_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        online_status_label.setStyleSheet("""
+            color: #00E676; 
+            font-weight: bold;
+            font-size: 14px;
+            background: transparent;
+        """)
+        
+        online_layout.addWidget(online_status_label)
+        self.online_container.hide()
+        
+        # See Video button
+        self.see_video_btn = QPushButton("See Video")
+        self.see_video_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00E676;
+                color: #000;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #00C853;
+            }
+            QPushButton:pressed {
+                background-color: #00A040;
+            }
+        """)
+        self.see_video_btn.setMaximumWidth(100)
+        self.see_video_btn.clicked.connect(self._on_see_video_clicked)
+        self.see_video_btn.hide()
+        
+        # Hide Video button (appears when video is visible)
+        self.hide_video_btn = QPushButton("Hide Video")
+        self.hide_video_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9100;
+                color: #000;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #FF6F00;
+            }
+            QPushButton:pressed {
+                background-color: #E65100;
+            }
+        """)
+        self.hide_video_btn.setMaximumWidth(100)
+        self.hide_video_btn.clicked.connect(self._on_hide_video_clicked)
+        self.hide_video_btn.hide()
+        
+        # Button container for centered layout
+        button_container = QHBoxLayout()
+        button_container.setSpacing(0)
+        button_container.addStretch()
+        button_container.addWidget(self.see_video_btn)
+        button_container.addWidget(self.hide_video_btn)
+        button_container.addStretch()
 
         # URL input field
         url_container = QHBoxLayout()
@@ -152,7 +230,9 @@ class CameraCell(QFrame):
         layout.addWidget(self.video_widget, 1)
         layout.addWidget(self.annotated_label, 1)
         layout.addWidget(self.offline_label, 1)
+        layout.addWidget(self.online_container, 1)
         layout.addLayout(url_container)
+        layout.addLayout(button_container)  # Changed from addWidget to addLayout
         layout.addWidget(self.fps_label)
 
         # Start video playback
@@ -226,7 +306,35 @@ class CameraCell(QFrame):
                 border-radius: 6px;
             }}
         """)
-
+    
+    def _on_see_video_clicked(self):
+        """Handle See Video button click - show video."""
+        if not self.is_enabled:
+            return
+        
+        self.is_video_visible = True
+        
+        # Show video and hide video button, hide see video button
+        self.video_widget.show()
+        self.hide_video_btn.show()
+        self.see_video_btn.hide()
+        self.online_container.hide()
+        self.annotated_label.hide()
+    
+    def _on_hide_video_clicked(self):
+        """Handle Hide Video button click - hide video but keep inference running."""
+        if not self.is_enabled:
+            return
+        
+        self.is_video_visible = False
+        
+        # Hide video and its button, show online status and see video button
+        self.video_widget.hide()
+        self.hide_video_btn.hide()
+        self.see_video_btn.show()
+        self.online_container.show()
+        self.annotated_label.hide()
+    
     def _on_toggle_changed(self, state):
         """Handle toggle state change - use text field value."""
         is_checked = (state == 2)
@@ -238,14 +346,18 @@ class CameraCell(QFrame):
             if path:
                 self.video_url = path
                 self.is_enabled = True
+                self.is_video_visible = False  # Don't show video yet
                 self._update_frame_style(True)
                 
-                # Show video, hide offline
-                self.video_widget.show()
+                # Show ONLINE status with See Video button
+                self.online_container.show()
+                self.see_video_btn.show()
+                self.video_widget.hide()
                 self.offline_label.hide()
                 self.annotated_label.hide()
+                self.hide_video_btn.hide()
                 
-                # Restart video with new path
+                # Start video in background (for inference)
                 self._start_video()
                 
                 # Emit signal to start inference
@@ -259,12 +371,16 @@ class CameraCell(QFrame):
         else:
             # Turned OFF
             self.is_enabled = False
+            self.is_video_visible = False
             self._update_frame_style(False)
             
             # Pause video
             self.media_player.pause()
             self.video_widget.hide()
             self.annotated_label.hide()
+            self.online_container.hide()
+            self.see_video_btn.hide()
+            self.hide_video_btn.hide()
             self.offline_label.show()
             
             # Reset FPS display
