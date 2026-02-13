@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, UTC
 from typing import List, Dict, Any
 
-from PyQt6.QtCore import Qt, QTimer, QThread, QMutex
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPainter, QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLabel, QGraphicsView
@@ -35,11 +35,11 @@ logger = logging.getLogger(__name__)
 class CenterPanel(QWidget):
     """Center panel with tactical map view and sensor fusion."""
 
+    # Signal: (camera_id, fps)
+    fps_updated = pyqtSignal(int, float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
-        # Mutex for thread-safe inference
-        self.inference_mutex = QMutex()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
@@ -164,7 +164,7 @@ class CenterPanel(QWidget):
         
         # Create Thread & Worker
         thread = QThread()
-        worker = InferenceWorker(camera_id, video_path, self._model_service, mutex=self.inference_mutex)
+        worker = InferenceWorker(camera_id, video_path, self._model_service)
         worker.moveToThread(thread)
         
         # Connect signals
@@ -180,6 +180,8 @@ class CenterPanel(QWidget):
         worker.detections_ready.connect(self.scene.update_detections)
         # 3. Handle Frame
         worker.frame_ready.connect(self._handle_frame)
+        # 4. Forward FPS updates
+        worker.fps_updated.connect(self.fps_updated.emit)
         
         # Store refs
         self.threads[camera_id] = thread

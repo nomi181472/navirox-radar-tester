@@ -37,12 +37,13 @@ class TacticalMapScene(QGraphicsScene):
         # Radar parameters (optimized for close range)
         self.radar_height = 4.5
         self.start_range = 0
-        self.end_range = 2  # 0-10m range as requested
+        self.end_range = 100  # 0-10m range as requested
         self.beam_angle = 25
         self.azimuth = 360 # Full 360 view
         self.transparency = 70
         self.heatmap_color = "#00E676"
         self.show_topographical = True
+        self.zoom_level = 1.0  # Default 100% zoom
         
         # Store graphics items for updates
         self.ring_items = []
@@ -388,19 +389,44 @@ class TacticalMapScene(QGraphicsScene):
     def update_radar_height(self, height: float):
         """Zoom support."""
         self.radar_height = max(0.5, height)
-        pass
+        # Redraw radar visualization with new height
+        self._draw_radar_rings()
+        self._draw_radar_sweep()
+        # Update obstacle positions - group by camera_id
+        detections_by_camera = {}
+        for (cam_id, track_id), item in self.obstacle_items.items():
+            if cam_id not in detections_by_camera:
+                detections_by_camera[cam_id] = []
+            detections_by_camera[cam_id].append(item["data"])
+        # Re-render detections for each camera
+        for cam_id, dets in detections_by_camera.items():
+            self.update_detections(cam_id, dets)
 
     def update_range(self, start: float, end: float):
         self.start_range = start
         self.end_range = max(start + 1, end) # Ensure at least 1m span
         self._draw_radar_rings()
         self._draw_radar_sweep()
-        # Force re-calc of obstacle positions
-        current_data = [item["data"] for item in self.obstacle_items.values()]
-        self.update_detections(current_data)
+        # Force re-calc of obstacle positions - group by camera_id
+        detections_by_camera = {}
+        for (cam_id, track_id), item in self.obstacle_items.items():
+            if cam_id not in detections_by_camera:
+                detections_by_camera[cam_id] = []
+            detections_by_camera[cam_id].append(item["data"])
+        # Re-render detections for each camera
+        for cam_id, dets in detections_by_camera.items():
+            self.update_detections(cam_id, dets)
 
     def update_angles(self, beam: float, azimuth: float):
         pass 
+
+    def update_zoom(self, zoom_percent: int):
+        """Update view zoom level (10-200%)."""
+        self.zoom_level = zoom_percent / 100.0
+        # Emit signal to parent view to update scale
+        for view in self.views():
+            view.resetTransform()
+            view.scale(self.zoom_level, self.zoom_level)
 
     def update_transparency(self, value: int):
         self.transparency = value

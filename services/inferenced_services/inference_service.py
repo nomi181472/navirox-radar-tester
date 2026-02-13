@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
-
-from datetime import datetime, UTC
-from typing import Any, List, Optional
 import time
+from datetime import datetime, UTC
+from typing import List, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 
@@ -17,7 +16,7 @@ from utils.data_format_converters import encode_frame_to_base64
 
 class UltralyticsCountFrameProcessingService(IFrameProcessingService):
     def __init__(self, model_id: Optional[str] = None):
-        self.logger: LoggerService()
+        self.logger = LoggerService()
         self.model_id = model_id
         self.color_manager = ColorManager()
 
@@ -132,17 +131,17 @@ class InferenceWorker(QObject):
     """
     detections_ready = pyqtSignal(int, list)      # camera_id, list of detection dicts
     frame_ready = pyqtSignal(int, object)         # camera_id, np.ndarray (as object)
+    fps_updated = pyqtSignal(int, float)          # camera_id, fps
     finished = pyqtSignal()
 
-    def __init__(self, camera_id: int, video_path: str, model_service: IModelService, mutex: QObject = None):
+    def __init__(self, camera_id: int, video_path: str, model_service: IModelService):
         super().__init__()
         self.camera_id = camera_id
         self.video_path = video_path
         self._model_service = model_service
-        self._mutex = mutex
-        print(f"Worker {self.camera_id}: Initialized. Mutex present: {self._mutex is not None}")
         self._running = True
         self.logger = LoggerService()
+        print(f"Worker {self.camera_id}: Initialized for {video_path}")
 
     def run(self):
         """Main inference loop."""
@@ -155,10 +154,17 @@ class InferenceWorker(QObject):
         # Verify model ID
         if not self._model_service.model_id:
             print(f"Worker {self.camera_id}: Error - ModelService.model_id is None/Empty. Model might not be initialized.")
+        else:
+            print(f"Worker {self.camera_id}: Started inference using model {self._model_service.model_id}")
 
-        print(f"Worker {self.camera_id}: Started inference on {self.video_path} using model {self._model_service.model_id}")
-
-        print(f"Worker {self.camera_id}: Started inference on {self.video_path}")
+        # FPS tracking (excludes sleep time)
+        frame_count = 0
+        total_processing_time = 0.0  # Accumulate only processing time
+        fps = 0.0
+        
+        # Frame skip optimization (process every Nth frame)
+        frame_skip = 2  # Process every 2nd frame
+        frame_counter = 0
 
         while self._running:
             try:
@@ -168,20 +174,21 @@ class InferenceWorker(QObject):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 
+                # Frame skipping optimization
+                frame_counter += 1
+                if frame_counter % frame_skip != 0:
+                    # Skip this frame, but still emit for PIP
+                    self.frame_ready.emit(self.camera_id, frame.copy())
+                    QThread.msleep(30)  # Reduced sleep for skipped frames
+                    continue
+                
+                inference_start = time.time()
+                
                 # Emit frame for PIP
                 self.frame_ready.emit(self.camera_id, frame.copy())
 
-                # Inference (sync, guarded by mutex if provided)
-                mutex = getattr(self, '_mutex', None)
-                if mutex:
-                    mutex.lock()
-                    try:
-                        results = self._model_service.model(frame)
-                    finally:
-                        mutex.unlock()
-                else:
-                    print(f"Worker {self.camera_id}: WARN - No mutex found, running unsafe!")
-                    results = self._model_service.model(frame)
+                # Run inference
+                results = self._model_service.model(frame)
                 
                 # Parse
                 data_loader = ModelStrategyFactory.get_data_loader(self._model_service.model_id)
@@ -206,23 +213,29 @@ class InferenceWorker(QObject):
                     })
                 
                 self.detections_ready.emit(self.camera_id, fusion_dets)
-                
-                # Debug print for verifying detection count
-                if fusion_dets:
-                    # Print one detection to verify data flow
-                    first = fusion_dets[0]
-                    print(f"Worker {self.camera_id}: Emitted {len(fusion_dets)} detections. "
-                          f"First: {first.get('class_name')} "
-                          f"Dist: {first.get('distance')}m Angle: {first.get('angle')}°")
-                else:
-                    # Optional: print empty once every N frames to avoid spam? For now, just print sparingly or nothing.
-                    pass
 
-                # Sleep to limit FPS (e.g. 100ms = 10 FPS)
-                QThread.msleep(100)
+                # Measure inference time
+                inference_time = time.time() - inference_start
+                print(f"Worker {self.camera_id}: Inference took {inference_time:.3f}s")
+
+                # Calculate FPS (excluding sleep time) - accumulate processing time only
+                frame_count += 1
+                total_processing_time += inference_time
+                
+                if frame_count >= 5:
+                    fps = frame_count / total_processing_time if total_processing_time > 0 else 0.0
+                    print(f"Worker {self.camera_id}: FPS = {fps:.1f} (pure processing, no sleep), emitting signal...")
+                    self.fps_updated.emit(self.camera_id, fps)
+                    frame_count = 0
+                    total_processing_time = 0.0
+
+                # Minimal sleep - excluded from FPS calculation
+                QThread.msleep(10)
 
             except Exception as e:
                 print(f"Worker {self.camera_id} error: {e}")
+                import traceback
+                traceback.print_exc()
                 # Don't crash thread, just sleep and retry
                 QThread.msleep(1000)
 

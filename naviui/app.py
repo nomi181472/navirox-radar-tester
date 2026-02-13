@@ -55,6 +55,11 @@ class MainWindow(QMainWindow):
         scene = self.center_panel.scene
         lp = self.left_panel
         
+        # Zoom slider -> View scale
+        lp.zoom_slider.valueChanged.connect(
+            lambda v: scene.update_zoom(v)
+        )
+        
         # Radar Height -> Zoom effect
         lp.height_spin.valueChanged.connect(
             lambda v: scene.update_radar_height(v)
@@ -91,3 +96,10 @@ class MainWindow(QMainWindow):
         
         # Connect Camera Controls (LeftPanel -> CenterPanel)
         lp.camera_control_signal.connect(self.center_panel.on_camera_control)
+        
+        # Connect FPS updates (CenterPanel -> Camera Cells)
+        def update_camera_fps(camera_id: int, fps: float):
+            if 1 <= camera_id <= len(lp.camera_cells):
+                lp.camera_cells[camera_id - 1].update_fps(fps)
+        
+        self.center_panel.fps_updated.connect(update_camera_fps)

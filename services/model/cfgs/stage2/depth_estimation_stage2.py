@@ -55,7 +55,7 @@ class DepthEstimationStage2(BaseStage):
         model_path: str,
         model_id: str,
         encoder: str = "vits",
-        features: int = 128,
+        features: int = 64,
         out_channels: Optional[List[int]] = None,
         device: Optional[str] = None,
         tag: Optional[str] = "",
@@ -112,7 +112,7 @@ class DepthEstimationStage2(BaseStage):
         if isinstance(state_dict, dict) and "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
 
-
+        self.model.load_state_dict(state_dict, strict=True)
 
         self.model.to(self.device).eval()
         print(f"[DepthEstimationStage2] Model loaded on {self.device}")

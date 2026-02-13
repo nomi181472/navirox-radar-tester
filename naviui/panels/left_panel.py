@@ -73,14 +73,14 @@ class LeftPanel(QWidget):
         # Range inputs
         self.start_range_spin = QDoubleSpinBox()
         self.start_range_spin.setRange(0, 1000)
-        self.start_range_spin.setValue(50)
+        self.start_range_spin.setValue(0)
         self.start_range_spin.setSuffix(" m")
         self.start_range_spin.setSingleStep(10)
         radar_layout.addRow("Start Range:", self.start_range_spin)
         
         self.end_range_spin = QDoubleSpinBox()
         self.end_range_spin.setRange(0, 5000)
-        self.end_range_spin.setValue(500)
+        self.end_range_spin.setValue(100)
         self.end_range_spin.setSuffix(" m")
         self.end_range_spin.setSingleStep(50)
         radar_layout.addRow("End Range:", self.end_range_spin)
