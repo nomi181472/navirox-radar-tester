@@ -30,7 +30,7 @@ class RightPanel(QWidget):
         ("Waypoint reached: WP-07", "#00E676"),
         ("New waypoint set: WP-08", "#29B6F6"),
         ("Obstacle detected - 200m ahead", "#FF9100"),
-        ("Collision avoidance active", "#FF1744"),
+        # ("Collision avoidance active", "#FF1744"),
         ("Safe passage confirmed", "#00E676"),
         ("Battery status: 95%", "#00E676"),
         ("Communication link stable", "#29B6F6"),
@@ -89,8 +89,8 @@ class RightPanel(QWidget):
             ("[17:55:01]", "System initialized successfully", "#00E676"),
             ("[17:55:12]", "Radar sweep initiated - Range: 500m", "#29B6F6"),
             ("[17:55:23]", "GPS lock acquired - 12 satellites", "#00E676"),
-            ("[17:55:35]", "Person detected at bearing 045°", "#FF1744"),
-            ("[17:55:36]", "Alert: Man overboard protocol initiated", "#FF1744"),
+            # ("[17:55:35]", "Person detected at bearing 045°", "#FF1744"),
+            # ("[17:55:36]", "Alert: Man overboard protocol initiated", "#FF1744"),
             ("[17:55:42]", "Vessel detected: DOCK at 200m", "#29B6F6"),
             ("[17:55:48]", "Course adjustment initiated +5°", "#FF9100"),
             ("[17:55:55]", "AIS target acquired: CARGO-7752", "#29B6F6"),
@@ -144,3 +144,24 @@ class RightPanel(QWidget):
             heading = 45 + random.randint(-3, 3)
             direction = "NE" if 22 <= heading <= 67 else "N" if heading < 22 else "E"
             self.status_labels["Heading:"].setText(f"{heading:03d}° {direction}")
+    
+    def add_proximity_alert(self, message: str, color: str = "#FF1744"):
+        """
+        Add a proximity alert message to the console with timestamp.
+        
+        Args:
+            message: Alert message to display
+            color: Color for the message (default: red)
+        """
+        now = datetime.now()
+        timestamp = now.strftime("[%H:%M:%S]")
+        
+        new_entry = f'<span style="color: #666;">{timestamp}</span> '
+        new_entry += f'<span style="color: {color}; font-weight: bold;">{message}</span><br>'
+        
+        self.log_html += new_entry
+        self.console.setHtml(self.log_html)
+        
+        # Auto-scroll to bottom
+        scrollbar = self.console.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())

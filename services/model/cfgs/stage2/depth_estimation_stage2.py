@@ -59,7 +59,7 @@ class DepthEstimationStage2(BaseStage):
         out_channels: Optional[List[int]] = None,
         device: Optional[str] = None,
         tag: Optional[str] = "",
-        depth_scale_factor: float = 10.0,
+        depth_scale_factor: float = 2.0,
         exclude_classes: Optional[List[str]] = None,
     ):
         """

@@ -5,6 +5,7 @@ Main Application Window - NaviUI Autonomous Navigation System.
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout
 
 from .panels import LeftPanel, CenterPanel, RightPanel, Header
+from services.managers.proximity_alert_manager import get_proximity_alert_manager
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +50,19 @@ class MainWindow(QMainWindow):
         
         # Connect radar control signals to tactical map scene
         self._connect_radar_controls()
+        
+        # Connect proximity alert manager to right panel
+        self._setup_proximity_alerts()
+    
+    def _setup_proximity_alerts(self):
+        """Configure proximity alert manager to send alerts to right panel."""
+        proximity_mgr = get_proximity_alert_manager()
+        
+        # Set callback to display alerts in right panel
+        def alert_callback(message: str, color: str, camera_id: int, track_id: int):
+            self.right_panel.add_proximity_alert(message, color)
+        
+        proximity_mgr.set_alert_callback(alert_callback)
     
     def _connect_radar_controls(self):
         """Wire up LeftPanel controls to update CenterPanel's TacticalMapScene."""

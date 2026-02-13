@@ -11,6 +11,7 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QPen, QPainterPath, QRadialGradie
 from PyQt6.QtWidgets import QGraphicsScene, QGraphicsEllipseItem, QGraphicsTextItem, QGraphicsRectItem
 
 from ..utils import create_topographical_map_pixmap, create_satellite_map_pixmap
+from services.managers.proximity_alert_manager import get_proximity_alert_manager
 
 
 class TacticalMapScene(QGraphicsScene):
@@ -132,6 +133,9 @@ class TacticalMapScene(QGraphicsScene):
         """
         current_keys = set()
         
+        # Get proximity alert manager
+        proximity_mgr = get_proximity_alert_manager()
+        
         color = self.RADAR_MARKER["color"]
         size = self.RADAR_MARKER["size"]
         
@@ -156,6 +160,13 @@ class TacticalMapScene(QGraphicsScene):
             key = (camera_id, track_id)
             current_keys.add(key)
             
+            # Check proximity alert and override color if needed
+            is_alert, alert_color = proximity_mgr.check_detection(camera_id, det)
+            if is_alert:
+                color = alert_color  # Use red color for close objects
+            else:
+                color = self.RADAR_MARKER["color"]  # Use default color
+            
             x, y = self.polar_to_screen(global_angle, distance)
             
             if x < 0 or x > self.scene_width or y < 0 or y > self.scene_height:
@@ -172,6 +183,13 @@ class TacticalMapScene(QGraphicsScene):
                 
                 graphics = items_dict["graphics"]
                 # 0:Dot, 1:Ring, 2:LabelBG, 3:Label, 4:Coord
+                
+                # Update colors dynamically based on proximity
+                qcolor = QColor(color)
+                graphics[0].setBrush(QBrush(qcolor.darker(150)))
+                graphics[0].setPen(QPen(qcolor, 2))
+                graphics[1].setPen(QPen(qcolor, 1, Qt.PenStyle.DashLine))
+                graphics[3].setDefaultTextColor(qcolor)
                 
                 graphics[0].setRect(x - size/2, y - size/2, size, size)
                 graphics[1].setRect(x - size, y - size, size*2, size*2)
@@ -228,6 +246,10 @@ class TacticalMapScene(QGraphicsScene):
                     items = self.obstacle_items.pop(key)["graphics"]
                     for item in items:
                         self.removeItem(item)
+        
+        # Notify proximity manager to cleanup stale alerts
+        all_current_keys = set(self.obstacle_items.keys())
+        proximity_mgr.cleanup_stale_alerts(all_current_keys)
 
     # ===== COORDINATE & DRAWING METHODS (Simplified/Optimized) =====
     
