@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..scenes import TacticalMapScene
-from ..widgets import PIPWindow
+from ..widgets import PIPWindow, DistanceTrackingGraph
 
 from services.inferenced_services.inference_service import (
     UltralyticsCountFrameProcessingService,
@@ -59,6 +59,17 @@ class CenterPanel(QWidget):
         self.view.setMinimumSize(600, 400)
 
         container_layout.addWidget(self.view)
+
+        # Distance Tracking Graphs (overlayed on top-left corner)
+        self.distance_graphs: Dict[int, DistanceTrackingGraph] = {}
+        graph_y_offset = 10
+        
+        for camera_id in range(1, 5):
+            graph = DistanceTrackingGraph(camera_id, self.view)
+            graph.setMaximumWidth(350)
+            graph.move(10, graph_y_offset)
+            self.distance_graphs[camera_id] = graph
+            graph_y_offset += 50  # Stack vertically with spacing
 
         # PIP Window (absolute positioned) - hidden by default
         self.pip = PIPWindow(self.view)
@@ -155,8 +166,15 @@ class CenterPanel(QWidget):
                 # In robust app, queue this. For prototype, just warn/return or init again.
             
             self._start_camera_inference(camera_id, video_path)
+            # Show distance graph for this camera
+            if camera_id in self.distance_graphs:
+                self.distance_graphs[camera_id].show_graph()
         else:
             self._stop_camera_inference(camera_id)
+            # Clear and hide distance graph for this camera
+            if camera_id in self.distance_graphs:
+                self.distance_graphs[camera_id].clear_all()
+                self.distance_graphs[camera_id].hide_graph()
 
     def _start_camera_inference(self, camera_id: int, video_path: str):
         # Stop existing if any
@@ -178,9 +196,11 @@ class CenterPanel(QWidget):
         worker.detections_ready.connect(self._handle_detections)
         # 2. Update Map directly (CV -> Map)
         worker.detections_ready.connect(self.scene.update_detections)
-        # 3. Handle Frame
+        # 3. Update distance tracking graphs
+        worker.detections_ready.connect(self._update_distance_graphs)
+        # 4. Handle Frame
         worker.frame_ready.connect(self._handle_frame)
-        # 4. Forward FPS updates
+        # 5. Forward FPS updates
         worker.fps_updated.connect(self.fps_updated.emit)
         
         # Store refs
@@ -214,6 +234,28 @@ class CenterPanel(QWidget):
     def _handle_detections(self, camera_id: int, detections: List[Dict[str, Any]]):
         """Receive detections from worker and update local cache."""
         self._camera_detections[camera_id] = detections
+    
+    def _update_distance_graphs(self, camera_id: int, detections: List[Dict[str, Any]]):
+        """Update distance tracking graphs with new detection data."""
+        if camera_id not in self.distance_graphs:
+            return
+        
+        graph = self.distance_graphs[camera_id]
+        
+        # Get current track IDs
+        current_tracks = set()
+        
+        # Update each detected object
+        for det in detections:
+            track_id = det.get("track_id")
+            distance = det.get("distance")
+            
+            if track_id is not None and distance is not None:
+                current_tracks.add(track_id)
+                graph.update_data(track_id, distance)
+        
+        # Clean up tracks that are no longer present
+        # (Optional: you can implement this in the graph widget if needed)
 
     def _handle_frame(self, camera_id: int, frame: Any):
         """Receive frame from worker for PIP display."""

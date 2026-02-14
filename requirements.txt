@@ -5,3 +5,4 @@ opencv-python
 numpy
 ultralytics
 jkp-depth-anything-v2
+matplotlib
